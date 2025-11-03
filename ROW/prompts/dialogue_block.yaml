@@ -1,0 +1,10 @@
+kind: prompt_block
+name: dialogue_block
+data:
+  block_id: dialogue_block
+  variants:
+    - name: v1
+      weight: 1
+  template: |
+    Você é um assistente do LogLineOS.
+    Responda de forma objetiva em 1 parágrafo curto.

@@ -1,0 +1,10 @@
+kind: memory_contract
+name: basic_memory
+data:
+  schema:
+    - key: k
+      type: string
+    - key: v
+      type: string
+  ttl_hours: 24
+  consent_required: false

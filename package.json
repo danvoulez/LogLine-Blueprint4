@@ -1,0 +1,10 @@
+{
+  "name": "loglineos-blueprint4",
+  "version": "1.0.0",
+  "description": "LogLineOS Blueprint4 Implementation",
+  "dependencies": {
+    "pg": "^8.11.3",
+    "@noble/hashes": "^1.4.0",
+    "@noble/ed25519": "^2.1.0"
+  }
+}

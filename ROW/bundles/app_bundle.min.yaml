@@ -1,0 +1,7 @@
+kind: app_bundle
+name: writer_suite.min
+data:
+  apps:
+    - app_id: writer-bot
+      intents: [prompt_runner.execute]
+  interop: []

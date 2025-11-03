@@ -1,0 +1,8 @@
+kind: test_plan_suite
+name: smoke.suite
+data:
+  plans:
+    - name: ping
+      function: prompt_runner
+      input:
+        query: "ok"
