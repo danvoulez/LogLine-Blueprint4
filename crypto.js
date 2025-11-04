@@ -77,11 +77,60 @@ async function verifySpan(span) {
   return true;
 }
 
+// AES-256-GCM encryption for memory content
+const nodeCrypto = require('crypto');
+
+async function encryptAES256GCM(plaintext, keyHex) {
+  if (!keyHex) {
+    throw new Error('Encryption key required');
+  }
+  
+  const key = fromHex(keyHex);
+  if (key.length !== 32) {
+    throw new Error('Key must be 32 bytes (256 bits) for AES-256');
+  }
+  
+  const iv = nodeCrypto.randomBytes(12); // 96-bit IV for GCM
+  const cipher = nodeCrypto.createCipheriv('aes-256-gcm', key, iv);
+  
+  let encrypted = cipher.update(plaintext, 'utf8');
+  encrypted = Buffer.concat([encrypted, cipher.final()]);
+  
+  const tag = cipher.getAuthTag();
+  
+  return {
+    encrypted: toHex(encrypted),
+    iv: toHex(iv),
+    tag: toHex(tag)
+  };
+}
+
+async function decryptAES256GCM(encryptedHex, ivHex, tagHex, keyHex) {
+  if (!keyHex) {
+    throw new Error('Decryption key required');
+  }
+  
+  const key = fromHex(keyHex);
+  const iv = fromHex(ivHex);
+  const tag = fromHex(tagHex);
+  const encrypted = fromHex(encryptedHex);
+  
+  const decipher = nodeCrypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  
+  let decrypted = decipher.update(encrypted);
+  decrypted = Buffer.concat([decrypted, decipher.final()]);
+  
+  return decrypted.toString('utf8');
+}
+
 module.exports = {
   toHex,
   fromHex,
   stableStringify,
   hashSpan,
   signSpan,
-  verifySpan
+  verifySpan,
+  encryptAES256GCM,
+  decryptAES256GCM
 };

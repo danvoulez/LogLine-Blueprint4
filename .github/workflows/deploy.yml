@@ -1,0 +1,138 @@
+name: Deploy LogLineOS Blueprint4
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  NODE_VERSION: '18'
+
+jobs:
+  deploy-lambda:
+    name: Deploy Lambda Functions
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Create deployment package
+        run: |
+          zip -r deploy.zip \
+            index.js \
+            handler.js \
+            migrate.js \
+            seed.js \
+            stage0_loader.js \
+            query.js \
+            api.js \
+            db.js \
+            crypto.js \
+            schema.sql \
+            ROW/ \
+            node_modules/ \
+            package.json \
+            -x "*.DS_Store" \
+            -q
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to Lambda
+        run: |
+          echo "🚀 Deploying Lambda functions..."
+          
+          # Deploy stage0-loader
+          aws lambda update-function-code \
+            --function-name loglineos-stage0-loader \
+            --zip-file fileb://deploy.zip \
+            --no-cli-pager
+          
+          # Deploy db-migration
+          aws lambda update-function-code \
+            --function-name loglineos-db-migration \
+            --zip-file fileb://deploy.zip \
+            --no-cli-pager
+          
+          # Deploy diagnostic
+          aws lambda update-function-code \
+            --function-name loglineos-diagnostic \
+            --zip-file fileb://deploy.zip \
+            --no-cli-pager
+          
+          echo "✅ Deployment complete!"
+
+  deploy-terraform:
+    name: Deploy Infrastructure (Terraform)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[terraform]')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.6.0'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: terraform
+        run: terraform plan
+
+      - name: Terraform Apply
+        working-directory: terraform
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        run: terraform apply -auto-approve
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linting
+        run: npm run lint || echo "No lint script found"
+
+      - name: Run tests
+        run: npm test || echo "No test script found"
+

@@ -1,0 +1,509 @@
+openapi: 3.1.0
+info:
+  title: LogLineOS API
+  version: "1.0"
+  description: |
+    Ledger-only, append-only, multitenant backend for spans, automations, policies, prompts, and memory.
+    All operations are append-only with cryptographic proofs (BLAKE3 + Ed25519).
+servers:
+  - url: https://your-logline-api.example.com
+    description: Production server
+  - url: http://localhost:3000
+    description: Local development server
+paths:
+  /api/spans:
+    get:
+      summary: List spans
+      description: Retrieve spans from the ledger with optional filtering
+      parameters:
+        - in: query
+          name: entity_type
+          schema:
+            type: string
+          description: Filter by entity type (e.g., function, execution, memory)
+        - in: query
+          name: status
+          schema:
+            type: string
+          description: Filter by status (e.g., active, complete, error)
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 1000
+          description: Maximum number of spans to return
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Span"
+    post:
+      summary: Create span (append-only)
+      description: Create a new span in the ledger. All spans are immutable and append-only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Span"
+      responses:
+        "200":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Span"
+  /api/timeline:
+    get:
+      summary: Visible timeline
+      description: Retrieve visible timeline filtered by RLS (Row-Level Security)
+      parameters:
+        - in: query
+          name: visibility
+          schema:
+            type: string
+            enum: [public, tenant, private]
+            default: tenant
+          description: Filter by visibility scope
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 1000
+          description: Maximum number of items to return
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Span"
+  /api/execute:
+    post:
+      summary: Schedule/trigger execution for a function span
+      description: Schedule execution of a function kernel via the request worker
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                span_id:
+                  type: string
+                  format: uuid
+                  description: ID of the function span to execute
+              required:
+                - span_id
+      responses:
+        "200":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scheduled_for:
+                    type: string
+                    format: uuid
+                  request_id:
+                    type: string
+                    format: uuid
+  /api/metrics:
+    get:
+      summary: Execution metrics
+      description: Retrieve execution metrics including counts and latency
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  counts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        day:
+                          type: string
+                          format: date
+                        status:
+                          type: string
+                        n:
+                          type: integer
+                  latency:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        day:
+                          type: string
+                          format: date
+                        avg_ms:
+                          type: integer
+                        p95_ms:
+                          type: number
+  /api/timeline/stream:
+    get:
+      summary: Server-Sent Events stream of new spans
+      description: Stream timeline updates in real-time via Server-Sent Events (SSE)
+      responses:
+        "200":
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+  /api/memory:
+    post:
+      summary: Upsert memory
+      description: |
+        Store or update a memory span. Supports optional encryption for sensitive content.
+        Session-aware: memories can be scoped to a session via X-LogLine-Session header.
+      parameters:
+        - in: header
+          name: X-LogLine-Session
+          schema:
+            type: string
+            format: uuid
+          description: Session ID for session-scoped memories
+        - in: header
+          name: X-LogLine-Memory
+          schema:
+            type: string
+            enum: [off, session-only, on]
+            default: on
+          description: Memory mode (off = no storage, session-only = session scope, on = full storage)
+        - in: header
+          name: X-LogLine-Sensitivity
+          schema:
+            type: string
+            enum: [public, internal, secret, pii]
+            default: internal
+          description: Sensitivity level (determines encryption)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryInput"
+      responses:
+        "200":
+          description: Created or updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Memory"
+  /api/memory/{id}:
+    get:
+      summary: Fetch one memory
+      description: Retrieve a single memory span by ID
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Memory span ID
+        - in: query
+          name: tenant_id
+          schema:
+            type: string
+          description: Tenant ID for RLS context
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Memory"
+        "404":
+          description: Memory not found
+  /api/memory/search:
+    get:
+      summary: Search memories
+      description: |
+        Search memories with scope ranking (session → private → tenant → public).
+        Supports text search and optional vector search.
+      parameters:
+        - in: query
+          name: Q
+          required: true
+          schema:
+            type: string
+          description: Search query
+        - in: query
+          name: TOPK
+          schema:
+            type: integer
+            default: 10
+            minimum: 1
+            maximum: 100
+          description: Maximum number of results
+        - in: query
+          name: USE_VECTOR
+          schema:
+            type: boolean
+            default: false
+          description: Enable vector search (if available)
+        - in: query
+          name: tenant_id
+          schema:
+            type: string
+          description: Tenant ID for RLS context
+        - in: header
+          name: X-LogLine-Session
+          schema:
+            type: string
+            format: uuid
+          description: Session ID for session-scoped search
+        - in: header
+          name: X-LogLine-Memory
+          schema:
+            type: string
+            enum: [off, session-only, on]
+            default: on
+          description: Memory mode
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemorySearchResult"
+components:
+  schemas:
+    Span:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique span identifier
+        seq:
+          type: integer
+          minimum: 0
+          description: Sequence number for versioning (append-only)
+        entity_type:
+          type: string
+          description: Entity type (function, execution, memory, policy, etc.)
+        who:
+          type: string
+          description: Actor who created the span
+        did:
+          type: string
+          description: Action performed
+        this:
+          type: string
+          description: Subject/target of the action
+        at:
+          type: string
+          format: date-time
+          description: Timestamp
+        parent_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Parent span ID
+        related_to:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Related span IDs
+        owner_id:
+          type: string
+          description: Owner identifier
+        tenant_id:
+          type: string
+          description: Tenant identifier for multitenancy
+        visibility:
+          type: string
+          enum: [private, tenant, public]
+          description: Visibility scope
+        status:
+          type: string
+          description: Status (active, complete, error, etc.)
+        name:
+          type: string
+          description: Human-readable name
+        description:
+          type: string
+          description: Description
+        code:
+          type: string
+          description: Code content (for functions)
+        language:
+          type: string
+          description: Programming language
+        runtime:
+          type: string
+          description: Runtime environment
+        input:
+          type: object
+          additionalProperties: true
+          description: Input data
+        output:
+          type: object
+          additionalProperties: true
+          description: Output data
+        error:
+          type: object
+          additionalProperties: true
+          description: Error information
+        duration_ms:
+          type: integer
+          description: Duration in milliseconds
+        trace_id:
+          type: string
+          description: Trace identifier for distributed tracing
+        prev_hash:
+          type: string
+          description: Previous span hash (chain integrity)
+        curr_hash:
+          type: string
+          description: Current span hash (BLAKE3)
+        signature:
+          type: string
+          description: Ed25519 signature
+        public_key:
+          type: string
+          description: Public key for signature verification
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Additional metadata
+      required:
+        - id
+        - seq
+        - entity_type
+        - who
+        - this
+        - at
+        - visibility
+    MemoryInput:
+      type: object
+      properties:
+        layer:
+          type: string
+          enum: [fact, preference, note, session]
+          description: Memory layer
+        type:
+          type: string
+          description: Memory type (e.g., user_fact, conversation_context)
+        content:
+          type: object
+          additionalProperties: true
+          description: Memory content (JSON object)
+        tags:
+          type: array
+          items:
+            type: string
+          description: Tags for categorization
+        schema_id:
+          type: string
+          format: uuid
+          description: Schema ID for validation
+        sensitivity:
+          type: string
+          enum: [public, internal, secret, pii]
+          default: internal
+          description: Sensitivity level
+        ttl_at:
+          type: string
+          format: date-time
+          description: Time-to-live expiration
+        owner_id:
+          type: string
+          description: Owner ID (defaults from auth context)
+        tenant_id:
+          type: string
+          description: Tenant ID (defaults from auth context)
+      required:
+        - layer
+        - type
+        - content
+    Memory:
+      allOf:
+        - $ref: "#/components/schemas/Span"
+        - type: object
+          properties:
+            entity_type:
+              type: string
+              enum: [memory]
+            layer:
+              type: string
+            type:
+              type: string
+            content:
+              type: object
+              additionalProperties: true
+            tags:
+              type: array
+              items:
+                type: string
+            schema_id:
+              type: string
+              format: uuid
+            sensitivity:
+              type: string
+            ttl_at:
+              type: string
+              format: date-time
+            session_id:
+              type: string
+              format: uuid
+            encrypted_content:
+              type: string
+              description: Encrypted content (if sensitivity != public)
+            encryption_iv:
+              type: string
+              description: Encryption IV
+            encryption_tag:
+              type: string
+              description: Encryption auth tag
+    MemorySearchResult:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        hits:
+          type: array
+          items:
+            type: object
+            properties:
+              span_id:
+                type: string
+                format: uuid
+              score:
+                type: number
+                description: Relevance score
+              scope:
+                type: string
+                enum: [session, private, tenant, public]
+                description: Scope where memory was found
+              memory:
+                $ref: "#/components/schemas/Memory"
+        total:
+          type: integer
+          description: Total number of hits
+        skipped:
+          type: boolean
+          description: Whether search was skipped (memory_mode=off)
+        reason:
+          type: string
+          description: Reason if skipped
+

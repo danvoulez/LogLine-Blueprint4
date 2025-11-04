@@ -10,20 +10,23 @@ async function seed() {
   console.log('✅ Connected to database\n');
   
   try {
-    // Read all kernel files
-    const kernelFiles = ['01-kernels.ndjson', '06-prompt-helper.ndjson', '07-memory-kernel.ndjson', '08-enrollment-kernel.ndjson'];
-    let kernels = [];
+    // Read all kernel files (hardened versions take precedence)
+    const kernelFiles = ['01-kernels-hardened.ndjson', '01-kernels.ndjson', '06-prompt-helper.ndjson', '07-memory-kernel.ndjson', '08-enrollment-kernel.ndjson', '09-prompt-build.ndjson', '10-prompt-runner.ndjson', '11-prompt-eval.ndjson', '12-prompt-bandit.ndjson', '13-memory-upsert.ndjson', '14-memory-search.ndjson'];
+    const kernelMap = new Map(); // Deduplicate by ID, last wins (hardened first)
     
     for (const file of kernelFiles) {
       const kernelsPath = path.join(__dirname, `ROW/kernels/${file}`);
       if (fs.existsSync(kernelsPath)) {
         const kernelsData = fs.readFileSync(kernelsPath, 'utf8');
         const fileKernels = kernelsData.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
-        kernels = kernels.concat(fileKernels);
+        for (const kernel of fileKernels) {
+          kernelMap.set(kernel.id, kernel); // Overwrite if exists (hardened takes precedence)
+        }
       }
     }
     
-    console.log(`📦 Seeding ${kernels.length} kernels...\n`);
+    const kernels = Array.from(kernelMap.values());
+    console.log(`📦 Seeding ${kernels.length} kernels (hardened versions preferred)...\n`);
     
     for (const kernel of kernels) {
       const span = {
@@ -250,6 +253,65 @@ async function seed() {
             console.log(`  ↻ ${span.name} (${span.id}) - updated to seq ${span.seq}`);
           } else {
             throw err;
+          }
+        }
+      }
+    }
+    
+    // Read prompt blocks, variants, and evals
+    const promptSeedFiles = ['09-prompt-blocks.ndjson', '10-prompt-variants.ndjson', '11-prompt-evals.ndjson'];
+    for (const file of promptSeedFiles) {
+      const filePath = path.join(__dirname, `ROW/prompts/${file}`);
+      if (fs.existsSync(filePath)) {
+        const data = fs.readFileSync(filePath, 'utf8');
+        const items = data.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+        
+        const entityTypeMap = {
+          '09-prompt-blocks.ndjson': 'prompt_block',
+          '10-prompt-variants.ndjson': 'prompt_variant',
+          '11-prompt-evals.ndjson': 'prompt_eval'
+        };
+        const entityType = entityTypeMap[file] || 'prompt_block';
+        
+        console.log(`\n📝 Seeding ${items.length} ${entityType} from ${file}...\n`);
+        
+        for (const item of items) {
+          const span = {
+            id: item.id,
+            seq: item.seq || 0,
+            entity_type: entityType,
+            who: item.who || 'system:seed',
+            did: item.did || 'defined',
+            this: item.this || entityType,
+            at: item.at || new Date().toISOString(),
+            name: item.name,
+            description: item.description,
+            status: item.status || 'active',
+            visibility: item.visibility || 'public',
+            owner_id: item.owner_id || 'system',
+            tenant_id: item.tenant_id || 'system',
+            metadata: item.metadata,
+            content: item.content,
+            input: item.input
+          };
+          
+          await signSpan(span);
+          
+          try {
+            await insertSpan(client, span);
+            console.log(`  ✓ ${span.name || entityType} (${span.id}) - inserted`);
+          } catch (err) {
+            if (err.code === '23505') {
+              const { rows: seqRows } = await client.query(
+                'SELECT COALESCE(MAX(seq), -1) as max_seq FROM ledger.universal_registry WHERE id = $1',
+                [span.id]
+              );
+              span.seq = seqRows[0].max_seq + 1;
+              await insertSpan(client, span);
+              console.log(`  ↻ ${span.name || entityType} (${span.id}) - updated to seq ${span.seq}`);
+            } else {
+              throw err;
+            }
           }
         }
       }

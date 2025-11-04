@@ -1,5 +1,6 @@
 const { getClient, setRlsContext, insertSpan } = require('./db');
-const { verifySpan } = require('./crypto');
+const { verifySpan, hashSpan, toHex, fromHex, encryptAES256GCM, decryptAES256GCM } = require('./crypto');
+const { blake3 } = require('@noble/hashes/blake3');
 
 exports.handler = async (event) => {
   const client = await getClient();
@@ -107,7 +108,19 @@ exports.handler = async (event) => {
         },
         client,
         console,
-        crypto: require('crypto'),
+        crypto: {
+          ...require('crypto'),
+          blake3: (data) => {
+            const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
+            const hash = blake3(bytes);
+            return hash;
+          },
+          hex: toHex,
+          toU8: fromHex,
+          randomUUID: require('crypto').randomUUID,
+          encryptAES256GCM: encryptAES256GCM,
+          decryptAES256GCM: decryptAES256GCM
+        },
         insertSpan: async (span) => await insertSpan(client, span),
         now: () => new Date().toISOString(),
         sql: async (query, params) => {

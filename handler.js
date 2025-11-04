@@ -13,11 +13,18 @@ const migrate = require('./migrate');
 const { seed } = require('./seed');
 const stage0 = require('./stage0_loader');
 const query = require('./query');
+const api = require('./api');
 
 exports.handler = async (event, context) => {
   console.log('📥 Event:', JSON.stringify(event, null, 2));
   
-  const action = event.action || (event.httpMethod ? null : 'boot');
+  // Route HTTP requests to API layer
+  if (event.httpMethod || event.requestContext) {
+    console.log('🌐 Routing to API layer...');
+    return await api.handler(event, context);
+  }
+  
+  const action = event.action || 'boot';
   
   try {
     switch (action) {
