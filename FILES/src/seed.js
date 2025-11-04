@@ -15,7 +15,7 @@ async function seed() {
     const kernelMap = new Map(); // Deduplicate by ID, last wins (hardened first)
     
     for (const file of kernelFiles) {
-      const kernelsPath = path.join(__dirname, `ROW/kernels/${file}`);
+      const kernelsPath = path.join(__dirname, '../../ROW/kernels', file);
       if (fs.existsSync(kernelsPath)) {
         const kernelsData = fs.readFileSync(kernelsPath, 'utf8');
         const fileKernels = kernelsData.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
@@ -71,7 +71,7 @@ async function seed() {
     }
     
     // Read manifest
-    const manifestPath = path.join(__dirname, 'ROW/manifest/03-manifest.ndjson');
+    const manifestPath = path.join(__dirname, '../../ROW/manifest/03-manifest.ndjson');
     if (fs.existsSync(manifestPath)) {
       const manifestData = fs.readFileSync(manifestPath, 'utf8');
       const manifests = manifestData.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
@@ -118,7 +118,7 @@ async function seed() {
     }
     
     // Read policies
-    const policiesPath = path.join(__dirname, 'ROW/policies/02-policies.ndjson');
+    const policiesPath = path.join(__dirname, '../../ROW/policies/02-policies.ndjson');
     if (fs.existsSync(policiesPath)) {
       const policiesData = fs.readFileSync(policiesPath, 'utf8');
       const policies = policiesData.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
@@ -165,7 +165,7 @@ async function seed() {
     }
     
     // Read providers
-    const providersPath = path.join(__dirname, 'ROW/providers/04-providers.ndjson');
+    const providersPath = path.join(__dirname, '../../ROW/providers/04-providers.ndjson');
     if (fs.existsSync(providersPath)) {
       const providersData = fs.readFileSync(providersPath, 'utf8');
       const providers = providersData.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
@@ -212,7 +212,7 @@ async function seed() {
     }
     
     // Read prompts
-    const promptsPath = path.join(__dirname, 'ROW/prompts/05-prompts.ndjson');
+    const promptsPath = path.join(__dirname, '../../ROW/prompts/05-prompts.ndjson');
     if (fs.existsSync(promptsPath)) {
       const promptsData = fs.readFileSync(promptsPath, 'utf8');
       const prompts = promptsData.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
@@ -261,7 +261,7 @@ async function seed() {
     // Read prompt blocks, variants, and evals
     const promptSeedFiles = ['09-prompt-blocks.ndjson', '10-prompt-variants.ndjson', '11-prompt-evals.ndjson'];
     for (const file of promptSeedFiles) {
-      const filePath = path.join(__dirname, `ROW/prompts/${file}`);
+      const filePath = path.join(__dirname, '../../ROW/prompts', file);
       if (fs.existsSync(filePath)) {
         const data = fs.readFileSync(filePath, 'utf8');
         const items = data.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));

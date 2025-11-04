@@ -13,13 +13,7 @@ echo "📦 Packaging Lambda..."
 zip -r deploy.zip \
   index.js \
   handler.js \
-  migrate.js \
-  seed.js \
-  stage0_loader.js \
-  query.js \
-  db.js \
-  crypto.js \
-  schema.sql \
+  FILES/ \
   ROW/ \
   node_modules/ \
   package.json \

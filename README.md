@@ -75,20 +75,20 @@ npm install
 export DATABASE_URL="postgresql://user:pass@host:5432/dbname"
 
 # Run migrations
-node migrate.js
+node FILES/src/migrate.js
 
-# Seed kernels, policies, providers
-node seed.js
+# Seed kernels, policies, providers from ROW/
+node FILES/src/seed.js
 ```
 
 ### 3. Deploy to AWS Lambda
 
 ```bash
-# Package and deploy
-bash deploy.sh
+# Package and deploy (uses FILES/ and ROW/)
+bash FILES/scripts/deploy.sh
 
 # Seed via Lambda
-bash invoke.sh seed
+bash FILES/scripts/invoke.sh seed
 ```
 
 ### 4. Test It!
@@ -215,6 +215,25 @@ All critical security tests passed with **A+ grade**:
 
 ## 🏗️ Architecture
 
+### Codebase Organization
+
+```
+loglineos-blueprint4/
+├── FILES/          # Project code (not in ledger)
+│   ├── src/        # Source code (handler, stage0, db, crypto, api)
+│   ├── config/     # Configuration (schema.sql)
+│   └── scripts/    # Deployment scripts
+├── ROW/            # Ledger data (spans that live in database)
+│   ├── kernels/    # Function spans
+│   ├── prompts/    # Prompt system spans
+│   ├── policies/   # Policy spans
+│   ├── providers/  # Provider spans
+│   └── manifest/   # Manifest spans
+└── handler.js      # Lambda entry point (re-exports FILES/src/handler.js)
+```
+
+### System Architecture
+
 ```
 ┌─────────────────┐
 │   Client App    │
@@ -226,12 +245,13 @@ All critical security tests passed with **A+ grade**:
 ┌─────────────────┐
 │  AWS Lambda     │
 │  Stage-0 Loader │
+│  (FILES/src/)   │
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐      ┌──────────────┐
 │   PostgreSQL    │◄─────│   Kernels    │
-│ Ledger (RLS)    │      │  (in ledger) │
+│ Ledger (RLS)    │      │  (ROW/ → DB) │
 └─────────────────┘      └──────────────┘
 ```
 

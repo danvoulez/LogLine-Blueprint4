@@ -16,7 +16,7 @@ exports.handler = async (event) => {
     await client.connect();
     console.log('✅ Connected to database');
     
-    const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+    const sql = fs.readFileSync(path.join(__dirname, '../config/schema.sql'), 'utf8');
     await client.query(sql);
     
     console.log('✅ Schema created/updated');
