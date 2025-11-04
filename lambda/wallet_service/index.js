@@ -13,7 +13,7 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { SecretsManager } = require('@aws-sdk/client-secrets-manager');
 const { blake3 } = require('@noble/hashes/blake3');
-const { ed25519 } = require('@noble/curves/ed25519');
+const { ed25519 } = require('@noble/ed25519');
 const { randomBytes } = require('crypto');
 
 const dynamoClient = DynamoDBDocumentClient.from(new DynamoDBClient({ region: process.env.AWS_REGION || 'us-east-1' }));
@@ -97,7 +97,7 @@ async function handleSignSpan(event, walletId) {
   
   // Get private key from Secrets Manager
   const secret = await getSecret(keyItem.secret_ref);
-  const privateKey = Buffer.from(secret.private_key_hex, 'hex');
+  const privateKey = Buffer.from(secret.private_key_hex || secret.privateKey, 'hex');
   
   // Canonicalize span (remove sig)
   const canonical = canonicalizeSpan(span);
@@ -112,10 +112,12 @@ async function handleSignSpan(event, walletId) {
   
   // Sign payload_hash + nonce + ts
   const signPayload = `${payloadHash}|${nonce}|${ts}`;
-  const signature = ed25519.sign(signPayload, privateKey);
+  const signPayloadBytes = new TextEncoder().encode(signPayload);
+  const signature = await ed25519.sign(signPayloadBytes, privateKey);
   
   // Calculate key_id (did:logline:<b3(pubkey)>)
-  const pubkeyHash = blake3(keyItem.pubkey_hex);
+  const pubkeyBytes = Buffer.from(keyItem.pubkey_hex, 'hex');
+  const pubkeyHash = blake3(pubkeyBytes);
   const keyId = `did:logline:${Buffer.from(pubkeyHash).toString('hex')}`;
   
   const sig = {
@@ -137,11 +139,86 @@ async function handleSignSpan(event, walletId) {
 }
 
 /**
+ * POST /wallet/sign/http
+ * Signs HTTP request with Ed25519
+ */
+async function handleSignHttp(event, walletId) {
+  const { kid, method, path_with_query, body_canon } = JSON.parse(event.body || '{}');
+  
+  if (!kid || !method || !path_with_query) {
+    return { statusCode: 400, body: JSON.stringify({ error: 'kid, method, path_with_query required' }) };
+  }
+  
+  const wallet = await getWallet(walletId);
+  if (!wallet || wallet.status !== 'active') {
+    return { statusCode: 404, body: JSON.stringify({ error: 'Wallet not found' }) };
+  }
+  
+  const keyItem = wallet.items?.[kid];
+  if (!keyItem || keyItem.status !== 'active' || keyItem.type !== 'ed25519') {
+    return { statusCode: 404, body: JSON.stringify({ error: 'Key not found or invalid' }) };
+  }
+  
+  if (!keyItem.caps.includes('sign.http')) {
+    return { statusCode: 403, body: JSON.stringify({ error: 'Key does not have sign.http capability' }) };
+  }
+  
+  // Get private key from Secrets Manager
+  const secret = await getSecret(keyItem.secret_ref);
+  const privateKey = Buffer.from(secret.private_key_hex || secret.privateKey, 'hex');
+  
+  // Build canonical string
+  const canonical = `${method}\n${path_with_query}\n${body_canon || ''}`;
+  const canonicalBytes = new TextEncoder().encode(canonical);
+  
+  // Generate nonce and timestamp
+  const nonce = randomBytes(16).toString('base64url');
+  const ts = Date.now();
+  
+  // Sign
+  const signPayload = `${canonical}|${nonce}|${ts}`;
+  const signPayloadBytes = new TextEncoder().encode(signPayload);
+  const signature = await ed25519.sign(signPayloadBytes, privateKey);
+  
+  // Calculate key_id
+  const pubkeyBytes = Buffer.from(keyItem.pubkey_hex, 'hex');
+  const pubkeyHash = blake3(pubkeyBytes);
+  const keyId = `did:logline:${Buffer.from(pubkeyHash).toString('hex')}`;
+  
+  // Check nonce (anti-replay)
+  const nonceKey = `${kid}|${nonce}`;
+  const nonceTable = process.env.NONCE_TABLE || 'nonces';
+  
+  // Store nonce with TTL (5 min)
+  await dynamoClient.send(new PutCommand({
+    TableName: nonceTable,
+    Item: {
+      k: nonceKey,
+      ttl: Math.floor(Date.now() / 1000) + 300
+    }
+  }));
+  
+  return {
+    statusCode: 200,
+    body: JSON.stringify({
+      headers: {
+        'X-LL-Alg': 'ed25519-blake3-v1',
+        'X-LL-KeyID': keyId,
+        'X-LL-KID': kid,
+        'X-LL-TS': ts.toString(),
+        'X-LL-Nonce': nonce,
+        'X-LL-Signature': Buffer.from(signature).toString('hex')
+      }
+    })
+  };
+}
+
+/**
  * POST /wallet/provider/invoke
  * Invokes LLM provider using key from wallet
  */
 async function handleProviderInvoke(event, walletId) {
-  const { kid, provider, model, input, with_memory, byo_key } = JSON.parse(event.body || '{}');
+  const { kid, provider, model, input, with_memory, byo_key, max_tokens } = JSON.parse(event.body || '{}');
   
   if (!kid || !provider || !model || !input) {
     return { statusCode: 400, body: JSON.stringify({ error: 'kid, provider, model, input required' }) };
@@ -157,39 +234,255 @@ async function handleProviderInvoke(event, walletId) {
     return { statusCode: 404, body: JSON.stringify({ error: 'Provider key not found' }) };
   }
   
+  // Check if provider matches
+  if (keyItem.provider !== provider) {
+    return { statusCode: 400, body: JSON.stringify({ error: 'Provider mismatch' }) };
+  }
+  
   // Get API key from Secrets Manager
   const secret = await getSecret(keyItem.secret_ref);
-  const apiKey = secret.api_key;
+  const apiKey = secret.api_key || secret.API_KEY || secret.key;
   
-  // Invoke provider (example: Anthropic)
-  if (provider === 'anthropic') {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: model,
-        max_tokens: 1024,
-        messages: input.messages || []
-      })
-    });
+  if (!apiKey) {
+    return { statusCode: 500, body: JSON.stringify({ error: 'API key not found in secret' }) };
+  }
+  
+  const traceId = `trace_${randomBytes(8).toString('hex')}`;
+  
+  try {
+    // Invoke provider
+    let response, data;
     
-    const data = await response.json();
+    if (provider === 'anthropic') {
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: model,
+          max_tokens: max_tokens || 1024,
+          messages: input.messages || []
+        })
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        return {
+          statusCode: response.status,
+          body: JSON.stringify({ error: 'Provider error', details: errorText })
+        };
+      }
+      
+      data = await response.json();
+      
+    } else if (provider === 'openai' || provider === 'openai-compatible') {
+      response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: model,
+          messages: input.messages || [],
+          max_tokens: max_tokens || 1024
+        })
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        return {
+          statusCode: response.status,
+          body: JSON.stringify({ error: 'Provider error', details: errorText })
+        };
+      }
+      
+      data = await response.json();
+      
+    } else {
+      return { statusCode: 400, body: JSON.stringify({ error: 'Provider not supported', provider }) };
+    }
+    
+    // Extract output text
+    let outputText = '';
+    if (data.content) {
+      // Anthropic format
+      outputText = Array.isArray(data.content) 
+        ? data.content.map(c => c.text || c).join('')
+        : data.content;
+    } else if (data.choices && data.choices[0]) {
+      // OpenAI format
+      outputText = data.choices[0].message?.content || '';
+    }
     
     return {
       statusCode: 200,
       body: JSON.stringify({
-        output: data,
-        usage: data.usage,
-        trace_id: `trace_${randomBytes(8).toString('hex')}`
+        output: { text: outputText },
+        usage: data.usage || { input_tokens: 0, output_tokens: 0 },
+        trace_id: traceId,
+        raw: data // Include raw response for debugging
+      })
+    };
+    
+  } catch (err) {
+    console.error('Provider invoke error:', err);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ 
+        error: 'Provider invoke failed',
+        message: err.message,
+        trace_id: traceId
       })
     };
   }
+}
+
+/**
+ * POST /wallet/key/register
+ * Register a new key (Ed25519 or provider key)
+ */
+async function handleKeyRegister(event, walletId) {
+  const { kid, type, pubkey_hex, secret_ref, provider, caps } = JSON.parse(event.body || '{}');
   
-  return { statusCode: 400, body: JSON.stringify({ error: 'Provider not supported' }) };
+  if (!kid || !type || !secret_ref) {
+    return { statusCode: 400, body: JSON.stringify({ error: 'kid, type, secret_ref required' }) };
+  }
+  
+  if (type === 'ed25519' && !pubkey_hex) {
+    return { statusCode: 400, body: JSON.stringify({ error: 'pubkey_hex required for ed25519' }) };
+  }
+  
+  if (type === 'provider_key' && !provider) {
+    return { statusCode: 400, body: JSON.stringify({ error: 'provider required for provider_key' }) };
+  }
+  
+  const wallet = await getWallet(walletId);
+  if (!wallet || wallet.status !== 'active') {
+    return { statusCode: 404, body: JSON.stringify({ error: 'Wallet not found' }) };
+  }
+  
+  // Check if key already exists
+  if (wallet.items?.[kid]) {
+    return { statusCode: 409, body: JSON.stringify({ error: 'Key already exists' }) };
+  }
+  
+  // Add key to wallet
+  const items = wallet.items || {};
+  items[kid] = {
+    type: type,
+    pubkey_hex: pubkey_hex || null,
+    secret_ref: secret_ref,
+    provider: provider || null,
+    caps: caps || [],
+    status: 'active',
+    created_at: Math.floor(Date.now() / 1000)
+  };
+  
+  await dynamoClient.send(new UpdateCommand({
+    TableName: process.env.WALLETS_TABLE,
+    Key: { wallet_id: walletId },
+    UpdateExpression: 'SET items = :items',
+    ExpressionAttributeValues: { ':items': items }
+  }));
+  
+  return {
+    statusCode: 200,
+    body: JSON.stringify({
+      ok: true,
+      kid: kid,
+      key_id: type === 'ed25519' ? `did:logline:${Buffer.from(blake3(Buffer.from(pubkey_hex, 'hex'))).toString('hex')}` : null
+    })
+  };
+}
+
+/**
+ * POST /wallet/key/rotate
+ * Rotate a key (generate new key pair, update secret)
+ */
+async function handleKeyRotate(event, walletId) {
+  const { kid, new_secret_ref } = JSON.parse(event.body || '{}');
+  
+  if (!kid || !new_secret_ref) {
+    return { statusCode: 400, body: JSON.stringify({ error: 'kid, new_secret_ref required' }) };
+  }
+  
+  const wallet = await getWallet(walletId);
+  if (!wallet || wallet.status !== 'active') {
+    return { statusCode: 404, body: JSON.stringify({ error: 'Wallet not found' }) };
+  }
+  
+  const keyItem = wallet.items?.[kid];
+  if (!keyItem) {
+    return { statusCode: 404, body: JSON.stringify({ error: 'Key not found' }) };
+  }
+  
+  // Update secret_ref
+  const items = wallet.items;
+  items[kid].secret_ref = new_secret_ref;
+  items[kid].rotated_at = Math.floor(Date.now() / 1000);
+  
+  await dynamoClient.send(new UpdateCommand({
+    TableName: process.env.WALLETS_TABLE,
+    Key: { wallet_id: walletId },
+    UpdateExpression: 'SET items = :items',
+    ExpressionAttributeValues: { ':items': items }
+  }));
+  
+  return {
+    statusCode: 200,
+    body: JSON.stringify({
+      ok: true,
+      kid: kid,
+      message: 'Key rotated successfully'
+    })
+  };
+}
+
+/**
+ * POST /wallet/key/revoke
+ * Revoke a key (mark as inactive)
+ */
+async function handleKeyRevoke(event, walletId) {
+  const { kid } = JSON.parse(event.body || '{}');
+  
+  if (!kid) {
+    return { statusCode: 400, body: JSON.stringify({ error: 'kid required' }) };
+  }
+  
+  const wallet = await getWallet(walletId);
+  if (!wallet || wallet.status !== 'active') {
+    return { statusCode: 404, body: JSON.stringify({ error: 'Wallet not found' }) };
+  }
+  
+  const keyItem = wallet.items?.[kid];
+  if (!keyItem) {
+    return { statusCode: 404, body: JSON.stringify({ error: 'Key not found' }) };
+  }
+  
+  // Mark key as revoked
+  const items = wallet.items;
+  items[kid].status = 'revoked';
+  items[kid].revoked_at = Math.floor(Date.now() / 1000);
+  
+  await dynamoClient.send(new UpdateCommand({
+    TableName: process.env.WALLETS_TABLE,
+    Key: { wallet_id: walletId },
+    UpdateExpression: 'SET items = :items',
+    ExpressionAttributeValues: { ':items': items }
+  }));
+  
+  return {
+    statusCode: 200,
+    body: JSON.stringify({
+      ok: true,
+      kid: kid,
+      message: 'Key revoked successfully'
+    })
+  };
 }
 
 /**
@@ -214,8 +507,16 @@ exports.handler = async (event) => {
         return await handleOpen(event, walletId);
       } else if (path.includes('/wallet/sign/span')) {
         return await handleSignSpan(event, walletId);
+      } else if (path.includes('/wallet/sign/http')) {
+        return await handleSignHttp(event, walletId);
       } else if (path.includes('/wallet/provider/invoke')) {
         return await handleProviderInvoke(event, walletId);
+      } else if (path.includes('/wallet/key/register')) {
+        return await handleKeyRegister(event, walletId);
+      } else if (path.includes('/wallet/key/rotate')) {
+        return await handleKeyRotate(event, walletId);
+      } else if (path.includes('/wallet/key/revoke')) {
+        return await handleKeyRevoke(event, walletId);
       }
     }
     

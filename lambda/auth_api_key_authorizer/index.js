@@ -129,25 +129,67 @@ exports.handler = async (event) => {
       return deny('token_expired');
     }
     
+    // Optional: Check scope requirements for specific routes
+    const route = event.path || event.requestContext?.path || '';
+    const method = event.httpMethod || event.requestContext?.httpMethod || 'GET';
+    const scopes = token.scopes || [];
+    
+    // Basic scope checking (can be enhanced)
+    const routeNeedsScope = (path, method) => {
+      if (path.includes('/wallet/')) return 'wallet.open';
+      if (path.includes('/cli/memory.add') && method === 'POST') return 'memory.write';
+      if (path.includes('/cli/memory.search') && method === 'POST') return 'memory.read';
+      if (path.includes('/cli/ask') && method === 'POST') return 'provider.invoke:*';
+      if (path.includes('/api/spans') && method === 'POST') return 'span.write';
+      if (path.includes('/api/boot') && method === 'POST') return 'kernel:invoke';
+      return null;
+    };
+    
+    const neededScope = routeNeedsScope(route, method);
+    if (neededScope) {
+      // Check if token has the required scope (wildcard or exact match)
+      const hasScope = scopes.some(scope => {
+        if (scope === neededScope) return true;
+        if (scope.endsWith('*') && neededScope.startsWith(scope.slice(0, -1))) return true;
+        if (neededScope.endsWith('*') && scope.startsWith(neededScope.slice(0, -1))) return true;
+        return false;
+      });
+      
+      if (!hasScope) {
+        console.log('❌ Insufficient scope:', { needed: neededScope, has: scopes });
+        return deny('insufficient_scope');
+      }
+    }
+    
     // Build context for API Gateway
     const context = {
       wallet_id: token.wallet_id,
       tenant_id: token.tenant_id,
-      scopes: JSON.stringify(token.scopes || []),
+      scopes: JSON.stringify(scopes),
       token_hash: tokenHash.substring(0, 16) // Truncated for logging
     };
     
     // Determine resource ARN (API Gateway v1 or v2)
-    const resource = event.methodArn || 
-                     `${event.requestContext?.apiId || '*'}/${event.requestContext?.stage || 'dev'}/*/*`;
+    // For v2, methodArn might be different format
+    let resource = event.methodArn;
+    if (!resource) {
+      // Try to construct from requestContext
+      if (event.requestContext?.apiId) {
+        resource = `arn:aws:execute-api:${process.env.AWS_REGION || 'us-east-1'}:${event.requestContext.accountId || '*'}:${event.requestContext.apiId}/${event.requestContext.stage || 'dev'}/*/*`;
+      } else {
+        resource = '*';
+      }
+    }
     
     console.log('✅ Token validated:', { 
       wallet_id: token.wallet_id, 
       tenant_id: token.tenant_id,
-      scopes_count: token.scopes?.length || 0 
+      scopes_count: scopes.length,
+      route: route
     });
     
     // Cache key = token_hash (first 32 chars)
+    // API Gateway caches for 60 seconds by default
     return allow(resource, context, tokenHash.substring(0, 32));
     
   } catch (error) {
