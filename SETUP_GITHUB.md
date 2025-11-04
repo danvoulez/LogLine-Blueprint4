@@ -5,7 +5,7 @@
 ### 1. Criar repositório no GitHub
 
 1. Acesse: https://github.com/new
-2. Nome: `LogLineOS-Blueprint4`
+2. Nome: `LogLine-Blueprint4` (ou `LogLineOS-Blueprint4` se preferir)
 3. Owner: `danvoulez`
 4. Público ou Privado (sua escolha)
 5. NÃO inicialize com README (já temos um)
@@ -14,7 +14,7 @@
 
 ```bash
 # Adicionar remote
-git remote add origin https://github.com/danvoulez/LogLineOS-Blueprint4.git
+git remote add origin https://github.com/danvoulez/LogLine-Blueprint4.git
 
 # Ou se usar SSH:
 git remote add origin git@github.com:danvoulez/LogLineOS-Blueprint4.git
@@ -36,7 +36,7 @@ git push -u origin main
 
 ### 4. Configurar Secrets no GitHub
 
-1. Acesse: https://github.com/danvoulez/LogLineOS-Blueprint4/settings/secrets/actions
+1. Acesse: https://github.com/danvoulez/LogLine-Blueprint4/settings/secrets/actions
 2. Adicione os seguintes secrets:
 
 ```
