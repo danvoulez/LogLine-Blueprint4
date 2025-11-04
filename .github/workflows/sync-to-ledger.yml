@@ -1,0 +1,82 @@
+name: Sync Code to Ledger
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ROW/**'
+      - 'FILES/src/**'
+      - 'lambda/**'
+  workflow_dispatch:
+
+jobs:
+  transform-to-spans:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Transform files to spans
+        run: node scripts/github-to-spans.js
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      - name: Upload spans artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spans-ndjson
+          path: |
+            .ledger/spans/*.ndjson
+          retention-days: 1
+
+  sync-to-ledger:
+    needs: transform-to-spans
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download spans artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: spans-ndjson
+          path: .ledger/spans
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Sync spans to ledger
+        run: node scripts/sync-spans-to-ledger.js
+        env:
+          DB_SECRET_ARN: ${{ secrets.DB_SECRET_ARN }}
+          AWS_REGION: us-east-1
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+
+      - name: Verify sync
+        run: node scripts/verify-kernels-in-db.js
+        env:
+          DB_SECRET_ARN: ${{ secrets.DB_SECRET_ARN }}
+          AWS_REGION: us-east-1
+

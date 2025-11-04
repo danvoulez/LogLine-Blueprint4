@@ -1,0 +1,19 @@
+{
+  "transformed_at": "2025-11-04T08:33:30.910Z",
+  "git": {
+    "sha": "local",
+    "ref": "refs/heads/main",
+    "repo": "loglineos-blueprint4",
+    "author": "system"
+  },
+  "spans_by_type": {
+    "function": 20,
+    "prompt": 6,
+    "prompt_block": 4,
+    "prompt_variant": 1,
+    "prompt_eval": 1,
+    "policy": 3,
+    "manifest": 1
+  },
+  "total_spans": 36
+}
