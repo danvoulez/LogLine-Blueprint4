@@ -60,6 +60,26 @@ exports.handler = async (event) => {
     
     const fnSpan = fnRows[0];
     
+    // 2.5. Check kernel-level scopes (if token is provided)
+    const authorizerContext = event.requestContext?.authorizer;
+    if (authorizerContext && event.path?.includes('/api/boot')) {
+      const scopes = JSON.parse(authorizerContext.scopes || '[]');
+      const kernelName = fnSpan.name || 'unknown';
+      const neededScope = `kernel:${kernelName}:invoke`;
+      
+      if (!scopes.includes(neededScope)) {
+        return {
+          statusCode: 403,
+          body: JSON.stringify({
+            error: 'insufficient_scope_for_kernel',
+            needed: neededScope,
+            has: scopes,
+            kernel: kernelName
+          })
+        };
+      }
+    }
+    
     // 3. Verify cryptographic integrity (if span has crypto fields)
     if (fnSpan.curr_hash && fnSpan.signature) {
       try {

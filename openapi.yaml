@@ -5,6 +5,7 @@ info:
   description: |
     Ledger-only, append-only, multitenant backend for spans, automations, policies, prompts, and memory.
     All operations are append-only with cryptographic proofs (BLAKE3 + Ed25519).
+    Authentication: Bearer tokens (API keys) issued via token_issuer kernel.
 servers:
   - url: https://your-logline-api.example.com
     description: Production server
@@ -399,11 +400,16 @@ components:
       properties:
         layer:
           type: string
-          enum: [fact, preference, note, session]
-          description: Memory layer
+          enum: [session, temporary, permanent, shared, local]
+          description: Memory layer (lifecycle & retention)
         type:
           type: string
-          description: Memory type (e.g., user_fact, conversation_context)
+          enum: [note, fact, profile, preference, relationship, plan, action, other]
+          description: Memory type
+        session_id:
+          type: string
+          format: uuid
+          description: Session ID for session-scoped memories
         content:
           type: object
           additionalProperties: true
@@ -446,35 +452,52 @@ components:
               enum: [memory]
             layer:
               type: string
+              enum: [session, temporary, permanent, shared, local]
+              description: Memory layer (lifecycle & retention)
             type:
               type: string
+              enum: [note, fact, profile, preference, relationship, plan, action, other]
+              description: Memory type
             content:
               type: object
               additionalProperties: true
+              description: Memory content (or {redacted: true} if encrypted)
             tags:
               type: array
               items:
                 type: string
+              description: Tags for categorization
             schema_id:
               type: string
               format: uuid
+              nullable: true
+              description: Schema ID for validation
             sensitivity:
               type: string
+              enum: [public, internal, secret, pii]
+              description: Sensitivity level
             ttl_at:
               type: string
               format: date-time
+              nullable: true
+              description: Time-to-live expiration
             session_id:
               type: string
               format: uuid
+              nullable: true
+              description: Session ID for session-scoped memories
             encrypted_content:
               type: string
+              nullable: true
               description: Encrypted content (if sensitivity != public)
             encryption_iv:
               type: string
-              description: Encryption IV
+              nullable: true
+              description: Encryption IV (12 bytes hex)
             encryption_tag:
               type: string
-              description: Encryption auth tag
+              nullable: true
+              description: Encryption auth tag (16 bytes hex)
     MemorySearchResult:
       type: object
       properties:
@@ -506,4 +529,507 @@ components:
         reason:
           type: string
           description: Reason if skipped
-
+  /api/chat:
+    post:
+      summary: Execute prompt variant
+      description: |
+        Execute a prompt variant (chat assistant). Returns normalized schema with text, confidence, actions, citations.
+        Uses prompt_runner_kernel internally.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+                  description: User message text
+                context:
+                  type: string
+                  description: Optional context to include
+                variant_id:
+                  type: string
+                  format: uuid
+                  description: Prompt variant ID (defaults to current bandit winner)
+              required:
+                - text
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromptRunResponse"
+        "400":
+          description: Bad request
+  /api/prompts/{id}:
+    get:
+      summary: Fetch prompt block or variant
+      description: Retrieve a prompt block or variant by ID
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Prompt block or variant ID
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/PromptBlock"
+                  - $ref: "#/components/schemas/PromptVariant"
+        "404":
+          description: Not found
+  /api/prompts/search:
+    get:
+      summary: Search prompts by tags
+      description: Search prompt blocks and variants by tags
+      parameters:
+        - in: query
+          name: tags
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+          description: Tags to search for (match any)
+        - in: query
+          name: entity_type
+          schema:
+            type: string
+            enum: [prompt_block, prompt_variant]
+          description: Filter by entity type
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  oneOf:
+                    - $ref: "#/components/schemas/PromptBlock"
+                    - $ref: "#/components/schemas/PromptVariant"
+  /api/prompts/variants/{family}:
+    get:
+      summary: List variants for family
+      description: Get all variants for a prompt family (e.g., vv_chat_agent)
+      parameters:
+        - in: path
+          name: family
+          required: true
+          schema:
+            type: string
+          description: Prompt family name
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PromptVariant"
+  /api/prompts/build:
+    post:
+      summary: Trigger build for variant
+      description: Build/compile a prompt variant into system prompt with compiled_hash
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                variant_id:
+                  type: string
+                  format: uuid
+                  description: Prompt variant ID to build
+              required:
+                - variant_id
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromptBuild"
+  /api/prompts/eval/{eval_id}:
+    post:
+      summary: Run eval fixtures
+      description: Execute evaluation fixtures for a prompt variant
+      parameters:
+        - in: path
+          name: eval_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Prompt eval ID
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        fixture_type:
+                          type: string
+                        passed:
+                          type: boolean
+                        output:
+                          type: object
+components:
+  schemas:
+    PromptBlock:
+      allOf:
+        - $ref: "#/components/schemas/Span"
+        - type: object
+          properties:
+            entity_type:
+              type: string
+              enum: [prompt_block]
+            content:
+              type: string
+              description: Prompt text with {{variables}}
+            metadata:
+              type: object
+              properties:
+                priority:
+                  type: integer
+                  description: Priority (higher = more important, 120 = doctrine, 100 = product, 90 = app, 70 = task)
+                vars:
+                  type: object
+                  additionalProperties: true
+                  description: Variable definitions
+                tags:
+                  type: array
+                  items:
+                    type: string
+                  description: Tags for categorization
+    PromptVariant:
+      allOf:
+        - $ref: "#/components/schemas/Span"
+        - type: object
+          properties:
+            entity_type:
+              type: string
+              enum: [prompt_variant]
+            metadata:
+              type: object
+              properties:
+                family:
+                  type: string
+                  description: Prompt family name (e.g., vv_chat_agent)
+                block_ids:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+                  description: IDs of prompt blocks to compose
+                vars:
+                  type: object
+                  additionalProperties: true
+                  description: Variant-specific variables (few_shots, tone, etc.)
+    PromptBuild:
+      allOf:
+        - $ref: "#/components/schemas/Span"
+        - type: object
+          properties:
+            entity_type:
+              type: string
+              enum: [prompt_build]
+            input:
+              type: object
+              properties:
+                variant_id:
+                  type: string
+                  format: uuid
+            output:
+              type: object
+              properties:
+                system_prompt:
+                  type: string
+                  description: Compiled system prompt text
+                compiled_hash:
+                  type: string
+                  description: SHA256 hash of compiled prompt
+            related_to:
+              type: array
+              items:
+                type: string
+                format: uuid
+              description: Related variant_id
+    PromptRun:
+      allOf:
+        - $ref: "#/components/schemas/Span"
+        - type: object
+          properties:
+            entity_type:
+              type: string
+              enum: [prompt_run]
+            input:
+              type: object
+              properties:
+                variant_id:
+                  type: string
+                  format: uuid
+                messages:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      role:
+                        type: string
+                        enum: [system, user, assistant]
+                      content:
+                        type: string
+                compiled_hash:
+                  type: string
+            output:
+              type: object
+              properties:
+                text:
+                  type: string
+                  description: Response text
+                confidence:
+                  type: number
+                  minimum: 0
+                  maximum: 1
+                  description: Confidence score
+                follow_up_question:
+                  type: string
+                  nullable: true
+                actions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                        enum: [create_span, execute_function, query, none]
+                      args:
+                        type: object
+                        additionalProperties: true
+                citations:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+                telemetry:
+                  type: object
+                  properties:
+                    tool_use_count:
+                      type: integer
+                      minimum: 0
+                    model:
+                      type: string
+                    latency_ms:
+                      type: integer
+            related_to:
+              type: array
+              items:
+                type: string
+                format: uuid
+              description: Related variant_id, build_id
+    PromptRunResponse:
+      type: object
+      description: Normalized response from /api/chat
+      properties:
+        ok:
+          type: boolean
+        variant_id:
+          type: string
+          format: uuid
+        compiled_hash:
+          type: string
+        text:
+          type: string
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        follow_up_question:
+          type: string
+          nullable: true
+        actions:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: [create_span, execute_function, query, none]
+              args:
+                type: object
+                additionalProperties: true
+        citations:
+          type: array
+          items:
+            type: string
+            format: uuid
+        telemetry:
+          type: object
+          properties:
+            tool_use_count:
+              type: integer
+              minimum: 0
+    ApiToken:
+      type: object
+      description: API token (hash stored in ledger, plaintext returned once)
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Token span ID
+        entity_type:
+          type: string
+          enum: [api_token]
+        status:
+          type: string
+          enum: [active, revoked]
+        metadata:
+          type: object
+          properties:
+            app_id:
+              type: string
+              nullable: true
+              description: Application ID that owns this token
+            token_prefix:
+              type: string
+              description: Token prefix (e.g., tok_acme_)
+            token_hash:
+              type: string
+              description: BLAKE3 hash of token (b3:hex)
+            scopes:
+              type: array
+              items:
+                type: string
+              description: List of scopes (e.g., /api/spans:write)
+            expires_at:
+              type: string
+              format: date-time
+              description: Token expiration timestamp
+        tenant_id:
+          type: string
+          description: Tenant ID
+        owner_id:
+          type: string
+          description: Owner ID
+    TokenIssueResponse:
+      type: object
+      description: Response from token_issuer kernel (plaintext token shown once)
+      properties:
+        ok:
+          type: boolean
+        token:
+          type: string
+          description: Plaintext token (shown once, not stored)
+          example: tok_acme_AbCdEf123GhIjKlMnOpQrStUvWxYz
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+          nullable: true
+        scopes:
+          type: array
+          items:
+            type: string
+        expires_at:
+          type: string
+          format: date-time
+        token_id:
+          type: string
+          format: uuid
+    ApiTokenRevoked:
+      type: object
+      description: Token revocation event
+      properties:
+        id:
+          type: string
+          format: uuid
+        entity_type:
+          type: string
+          enum: [api_token_revoked]
+        status:
+          type: string
+          enum: [revoked]
+        related_to:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: IDs of revoked tokens
+        metadata:
+          type: object
+          properties:
+            reason:
+              type: string
+              enum: [compromised, rotation, expired, manual]
+              description: Reason for revocation
+    TokenUse:
+      type: object
+      description: Token usage telemetry span
+      properties:
+        id:
+          type: string
+          format: uuid
+        entity_type:
+          type: string
+          enum: [token_use]
+        who:
+          type: string
+          enum: [edge:authorizer]
+        status:
+          type: string
+          enum: [ok, denied]
+        metadata:
+          type: object
+          properties:
+            token_hash:
+              type: string
+              description: Hash of token used
+            route:
+              type: string
+              description: API route accessed
+            method:
+              type: string
+              description: HTTP method
+            scopes_checked:
+              type: array
+              items:
+                type: string
+              description: Scopes that were checked
+            trace_id:
+              type: string
+              description: Request trace ID
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: token
+      description: |
+        API token issued via token_issuer kernel.
+        Format: tok_{tenant_id}_{random_base64url}
+        Example: tok_acme_AbCdEf123GhIjKlMnOpQrStUvWxYz
