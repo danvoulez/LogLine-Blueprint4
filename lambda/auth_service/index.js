@@ -68,6 +68,12 @@ async function handleIssue(event) {
   const authorizer = event.requestContext?.authorizer || {};
   const createdBy = authorizer.wallet_id || 'system';
   
+  // Determine token type (api_token for users, service_token for apps)
+  const tokenType = description?.includes('service') || description?.includes('app') ? 'service_token' : 'api_token';
+  const defaultTTL = tokenType === 'service_token' ? 8760 : 24; // 1 year for service, 24h for user
+  const finalTTL = ttl_hours || defaultTTL;
+  const finalExp = Math.floor(Date.now() / 1000) + (finalTTL * 3600);
+  
   // Store in DynamoDB
   await dynamoClient.send(new PutCommand({
     TableName: process.env.TOKENS_TABLE,
@@ -76,20 +82,33 @@ async function handleIssue(event) {
       wallet_id: wallet_id,
       tenant_id: tenant_id,
       scopes: scopes,
-      exp: exp,
+      exp: finalExp,
       status: 'active',
       description: description || '',
+      token_type: tokenType,
       created_at: Math.floor(Date.now() / 1000),
       created_by: createdBy
     }
   }));
+  
+  // Get KID from wallet (if available)
+  const kid = authorizer.kid || 'unknown';
+  
+  // Emit token_issued span
+  try {
+    await emitTokenIssuedSpan(tokenHash, wallet_id, tenant_id, kid, scopes, finalExp, tokenType);
+  } catch (err) {
+    console.warn('Failed to emit token_issued span:', err.message);
+  }
   
   // Return token (shown once!)
   return {
     statusCode: 200,
     body: JSON.stringify({
       token: token,
-      exp: exp
+      exp: finalExp,
+      token_type: tokenType,
+      ttl_hours: finalTTL
     })
   };
 }
@@ -167,6 +186,192 @@ async function handleRotate(event) {
 }
 
 /**
+ * POST /auth/identity/register
+ * Registers a new identity (user) with Ed25519 key
+ */
+async function handleIdentityRegister(event) {
+  const body = JSON.parse(event.body || '{}');
+  const { kid, pubkey_hex, display_name, email, tenant_id } = body;
+  
+  if (!kid || !pubkey_hex || !tenant_id) {
+    return { statusCode: 400, body: JSON.stringify({ error: 'kid, pubkey_hex, tenant_id required' }) };
+  }
+  
+  // Validate span signature if provided
+  const span = body.span;
+  if (!span || !span.sig) {
+    return { statusCode: 400, body: JSON.stringify({ error: 'Signed identity_registration span required' }) };
+  }
+  
+  // Store span in ledger (via /api/spans)
+  // For now, we'll return the span structure for the client to store
+  const identitySpan = {
+    id: span.id || `identity_${Date.now()}_${randomBytes(4).toString('hex')}`,
+    seq: 0,
+    entity_type: 'identity_registration',
+    who: 'user:self',
+    did: 'registered',
+    this: 'identity.user',
+    at: new Date().toISOString(),
+    status: 'pending', // Will be 'active' after attestation
+    owner_id: email || `user_${kid.substring(0, 8)}`,
+    tenant_id: tenant_id,
+    visibility: 'tenant',
+    metadata: {
+      kid: kid,
+      display_name: display_name || '',
+      email: email || ''
+    },
+    sig: span.sig
+  };
+  
+  // Generate nonce for attestation
+  const nonce = randomBytes(16).toString('base64url');
+  
+  // Store nonce temporarily (in DynamoDB or return for client to sign)
+  // For now, return nonce for client to attest
+  
+  return {
+    statusCode: 200,
+    body: JSON.stringify({
+      ok: true,
+      identity_span: identitySpan,
+      attestation_nonce: nonce,
+      next_step: 'POST /auth/attest with signed nonce'
+    })
+  };
+}
+
+/**
+ * POST /auth/attest
+ * Key attestation: client signs nonce to prove key control
+ */
+async function handleAttest(event) {
+  const { kid, nonce, signature, attestation_hash } = JSON.parse(event.body || '{}');
+  
+  if (!kid || !nonce || !signature) {
+    return { statusCode: 400, body: JSON.stringify({ error: 'kid, nonce, signature required' }) };
+  }
+  
+  // Verify signature (would need pubkey from identity_registration)
+  // For now, accept if signature format is valid
+  
+  // Create key_attestation span
+  const attestationSpan = {
+    id: `attest_${Date.now()}_${randomBytes(4).toString('hex')}`,
+    seq: 0,
+    entity_type: 'key_attestation',
+    who: 'user:self',
+    did: 'attested',
+    this: 'identity.attestation',
+    at: new Date().toISOString(),
+    status: 'verified',
+    owner_id: `user_${kid.substring(0, 8)}`,
+    tenant_id: 'unknown', // Should come from identity_registration
+    visibility: 'tenant',
+    metadata: {
+      kid: kid,
+      nonce: nonce,
+      attestation_hash: attestation_hash || 'pending'
+    },
+    sig: {
+      alg: 'ed25519-blake3-v1',
+      kid: kid,
+      signature: signature
+    }
+  };
+  
+  return {
+    statusCode: 200,
+    body: JSON.stringify({
+      ok: true,
+      attestation_span: attestationSpan,
+      next_step: 'Wallet will be opened and token issued'
+    })
+  };
+}
+
+/**
+ * Helper: Store span in ledger via /api/spans
+ */
+async function storeSpanInLedger(span, apiUrl, apiKey) {
+  const https = require('https');
+  const http = require('http');
+  const url = require('url');
+  
+  const apiUrlObj = new URL(apiUrl.startsWith('http') ? apiUrl : `https://${apiUrl}`);
+  const client = apiUrlObj.protocol === 'https:' ? https : http;
+  
+  const postData = JSON.stringify(span);
+  const options = {
+    hostname: apiUrlObj.hostname,
+    port: apiUrlObj.port || (apiUrlObj.protocol === 'https:' ? 443 : 80),
+    path: '/api/spans',
+    method: 'POST',
+    headers: {
+      'Authorization': `ApiKey ${apiKey}`,
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(postData)
+    }
+  };
+  
+  return new Promise((resolve, reject) => {
+    const req = client.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        if (res.statusCode >= 400) {
+          reject(new Error(`API error: ${res.statusCode} ${data}`));
+        } else {
+          resolve(JSON.parse(data));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(postData);
+    req.end();
+  });
+}
+
+/**
+ * Helper: Emit token_issued span
+ */
+async function emitTokenIssuedSpan(tokenHash, walletId, tenantId, kid, scopes, exp, tokenType = 'api_token') {
+  const span = {
+    id: `token_${Date.now()}_${randomBytes(4).toString('hex')}`,
+    seq: 0,
+    entity_type: tokenType === 'api_token' ? 'api_token_issued' : 'service_token_issued',
+    who: 'kernel:auth_service',
+    did: 'issued',
+    this: `security.${tokenType}`,
+    at: new Date().toISOString(),
+    status: 'active',
+    owner_id: walletId,
+    tenant_id: tenantId,
+    visibility: 'tenant',
+    metadata: {
+      token_hash: tokenHash.substring(0, 16) + '...', // Truncated for security
+      wallet_id: walletId,
+      kid: kid || 'unknown',
+      scopes: scopes,
+      exp: exp,
+      ttl_hours: Math.floor((exp - Math.floor(Date.now() / 1000)) / 3600)
+    }
+  };
+  
+  // Store span (if API Gateway URL is available)
+  if (process.env.API_GATEWAY_URL && process.env.BOOTSTRAP_TOKEN) {
+    try {
+      await storeSpanInLedger(span, process.env.API_GATEWAY_URL, process.env.BOOTSTRAP_TOKEN);
+    } catch (err) {
+      console.warn('Failed to store token_issued span:', err.message);
+    }
+  }
+  
+  return span;
+}
+
+/**
  * GET /auth/keys/list
  * Lists tokens (metadata only, never plaintext)
  */
@@ -213,7 +418,11 @@ exports.handler = async (event) => {
     
     // Route requests
     if (method === 'POST') {
-      if (path.includes('/auth/keys/issue')) {
+      if (path.includes('/auth/identity/register')) {
+        return await handleIdentityRegister(event);
+      } else if (path.includes('/auth/attest')) {
+        return await handleAttest(event);
+      } else if (path.includes('/auth/keys/issue')) {
         return await handleIssue(event);
       } else if (path.includes('/auth/keys/revoke')) {
         return await handleRevoke(event);

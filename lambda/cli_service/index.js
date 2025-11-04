@@ -244,6 +244,109 @@ async function handleRun(event, context) {
 }
 
 /**
+ * POST /cli/device.register
+ * Registers a device for a user
+ */
+async function handleDeviceRegister(event, context) {
+  const { device_fingerprint, device_name, device_type, pubkey } = JSON.parse(event.body || '{}');
+  
+  if (!device_fingerprint || !device_name) {
+    return { statusCode: 400, body: JSON.stringify({ error: 'device_fingerprint, device_name required' }) };
+  }
+  
+  const span = {
+    id: `device_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    seq: 0,
+    entity_type: 'device_registration',
+    who: context.userId,
+    did: 'registered',
+    this: `device.${device_fingerprint}`,
+    at: new Date().toISOString(),
+    status: 'active',
+    owner_id: context.userId,
+    tenant_id: context.tenantId,
+    visibility: 'private',
+    content: {
+      device_fingerprint: device_fingerprint,
+      device_name: device_name,
+      device_type: device_type || 'unknown'
+    },
+    metadata: {
+      pubkey: pubkey || null,
+      registered_at: Date.now()
+    }
+  };
+  
+  // Sign and store (similar to app.register)
+  const walletId = context.walletId;
+  const apiKey = event.headers?.authorization?.replace(/^ApiKey\s+/i, '');
+  
+  const signResult = await callWalletService(
+    walletId,
+    '/wallet/sign/span',
+    { kid: 'kid_ed25519_main', span: span },
+    apiKey
+  );
+  
+  span.payload_hash = signResult.payload_hash;
+  span.sig = signResult.sig;
+  
+  // Store in ledger
+  try {
+    const apiUrl = process.env.API_GATEWAY_URL || event.headers?.host || 'https://api.example.com/dev';
+    const https = require('https');
+    const http = require('http');
+    const apiUrlObj = new URL(apiUrl.startsWith('http') ? apiUrl : `https://${apiUrl}`);
+    const client = apiUrlObj.protocol === 'https:' ? https : http;
+    
+    const postData = JSON.stringify(span);
+    const response = await new Promise((resolve, reject) => {
+      const req = client.request({
+        hostname: apiUrlObj.hostname,
+        port: apiUrlObj.port || (apiUrlObj.protocol === 'https:' ? 443 : 80),
+        path: '/api/spans',
+        method: 'POST',
+        headers: {
+          'Authorization': `ApiKey ${apiKey}`,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(postData)
+        }
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => resolve({ statusCode: res.statusCode, body: data }));
+      });
+      req.on('error', reject);
+      req.write(postData);
+      req.end();
+    });
+    
+    if (response.statusCode >= 400) {
+      return { statusCode: response.statusCode, body: response.body };
+    }
+    
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        ok: true,
+        device_id: span.id,
+        stored: true
+      })
+    };
+  } catch (err) {
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        ok: true,
+        device_id: span.id,
+        stored: false,
+        warning: err.message
+      })
+    };
+  }
+}
+
+/**
  * POST /cli/app.register
  * Registers an app (onboarding via spans)
  */
@@ -412,6 +515,8 @@ exports.handler = async (event) => {
         return await handleRun(event, context);
       } else if (path.includes('/cli/app.register')) {
         return await handleAppRegister(event, context);
+      } else if (path.includes('/cli/device.register')) {
+        return await handleDeviceRegister(event, context);
       }
     }
     

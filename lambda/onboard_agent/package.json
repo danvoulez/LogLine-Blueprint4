@@ -1,0 +1,19 @@
+{
+  "name": "loglineos-onboard-agent",
+  "version": "1.0.0",
+  "description": "Lambda Onboard Agent for LogLineOS - automates onboarding after app registration",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {},
+  "keywords": [
+    "lambda",
+    "onboarding",
+    "loglineos",
+    "automation"
+  ],
+  "author": "LogLineOS",
+  "license": "MIT"
+}
+
