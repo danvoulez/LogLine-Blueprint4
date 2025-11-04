@@ -293,17 +293,86 @@ async function handleAppRegister(event, context) {
   span.payload_hash = signResult.payload_hash;
   span.sig = signResult.sig;
   
-  // Store in ledger (via Stage-0 or direct insert)
-  // TODO: Implement span storage
-  
-  return {
-    statusCode: 200,
-    body: JSON.stringify({
-      ok: true,
-      app_id: app_id,
-      span_id: span.id
-    })
-  };
+  // Store in ledger via API Gateway /api/spans endpoint
+  try {
+    const apiUrl = process.env.API_GATEWAY_URL || event.headers?.host || 'https://api.example.com/dev';
+    const apiKey = event.headers?.authorization?.replace(/^ApiKey\s+/i, '') || '';
+    
+    // Use https module (built-in, no dependency needed)
+    const https = require('https');
+    const http = require('http');
+    const url = require('url');
+    
+    const apiUrlObj = new URL(apiUrl.startsWith('http') ? apiUrl : `https://${apiUrl}`);
+    const client = apiUrlObj.protocol === 'https:' ? https : http;
+    
+    const postData = JSON.stringify(span);
+    const options = {
+      hostname: apiUrlObj.hostname,
+      port: apiUrlObj.port || (apiUrlObj.protocol === 'https:' ? 443 : 80),
+      path: '/api/spans',
+      method: 'POST',
+      headers: {
+        'Authorization': `ApiKey ${apiKey}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData)
+      }
+    };
+    
+    // Make HTTP request
+    const response = await new Promise((resolve, reject) => {
+      const req = client.request(options, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          resolve({
+            statusCode: res.statusCode,
+            body: data
+          });
+        });
+      });
+      
+      req.on('error', reject);
+      req.write(postData);
+      req.end();
+    });
+    
+    if (response.statusCode >= 400) {
+      console.error('Failed to store span:', response.body);
+      return {
+        statusCode: response.statusCode,
+        body: JSON.stringify({ 
+          error: 'Failed to store app registration span',
+          details: response.body 
+        })
+      };
+    }
+    
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        ok: true,
+        app_id: app_id,
+        span_id: span.id,
+        stored: true
+      })
+    };
+  } catch (err) {
+    console.error('Error storing span:', err);
+    // Fallback: return success but log error (span was signed, just not stored yet)
+    // In production, you might want to queue this for retry
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        ok: true,
+        app_id: app_id,
+        span_id: span.id,
+        stored: false,
+        warning: 'Span created and signed, but storage failed. Span is ready to be stored manually or retried.',
+        error: err.message
+      })
+    };
+  }
 }
 
 /**
