@@ -1,0 +1,272 @@
+name: Deploy All Lambda Functions
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  NODE_VERSION: '18'
+
+jobs:
+  deploy-lambdas:
+    name: Deploy All Lambda Functions
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy Legacy Lambdas (Stage-0, DB Migration, Diagnostic)
+        run: |
+          echo "📦 Building legacy Lambda package..."
+          npm ci
+          zip -r deploy-legacy.zip \
+            index.js \
+            handler.js \
+          FILES/ \
+          ROW/ \
+          node_modules/ \
+          package.json \
+          -x "*.DS_Store" \
+          -q
+          
+          echo "🚀 Deploying legacy Lambda functions..."
+          
+          # Deploy stage0-loader
+          if aws lambda get-function --function-name loglineos-stage0-loader --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
+            aws lambda update-function-code \
+              --function-name loglineos-stage0-loader \
+              --zip-file fileb://deploy-legacy.zip \
+              --region ${{ env.AWS_REGION }} \
+              --no-cli-pager
+            echo "✅ Updated loglineos-stage0-loader"
+          else
+            echo "⚠️  loglineos-stage0-loader not found, skipping"
+          fi
+          
+          # Deploy db-migration
+          if aws lambda get-function --function-name loglineos-db-migration --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
+            aws lambda update-function-code \
+              --function-name loglineos-db-migration \
+              --zip-file fileb://deploy-legacy.zip \
+              --region ${{ env.AWS_REGION }} \
+              --no-cli-pager
+            echo "✅ Updated loglineos-db-migration"
+          else
+            echo "⚠️  loglineos-db-migration not found, skipping"
+          fi
+          
+          # Deploy diagnostic
+          if aws lambda get-function --function-name loglineos-diagnostic --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
+            aws lambda update-function-code \
+              --function-name loglineos-diagnostic \
+              --zip-file fileb://deploy-legacy.zip \
+              --region ${{ env.AWS_REGION }} \
+              --no-cli-pager
+            echo "✅ Updated loglineos-diagnostic"
+          else
+            echo "⚠️  loglineos-diagnostic not found, skipping"
+          fi
+          
+          rm -f deploy-legacy.zip
+
+      - name: Deploy Auth Service
+        run: |
+          echo "📦 Building Auth Service..."
+          cd lambda/auth_service
+          if [ -f "package.json" ]; then
+            npm install --production
+          fi
+          zip -r ../../auth-service.zip . -x "*.git*" "*.md" "*.test.js" "node_modules/.cache/*" -q
+          cd ../..
+          
+          if aws lambda get-function --function-name loglineos-auth-service --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
+            aws lambda update-function-code \
+              --function-name loglineos-auth-service \
+              --zip-file fileb://auth-service.zip \
+              --region ${{ env.AWS_REGION }} \
+              --no-cli-pager
+            echo "✅ Updated loglineos-auth-service"
+          else
+            echo "⚠️  loglineos-auth-service not found, skipping"
+          fi
+          rm -f auth-service.zip
+
+      - name: Deploy Wallet Service
+        run: |
+          echo "📦 Building Wallet Service..."
+          cd lambda/wallet_service
+          if [ -f "package.json" ]; then
+            npm install --production
+          fi
+          zip -r ../../wallet-service.zip . -x "*.git*" "*.md" "*.test.js" "node_modules/.cache/*" -q
+          cd ../..
+          
+          if aws lambda get-function --function-name loglineos-wallet-service --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
+            aws lambda update-function-code \
+              --function-name loglineos-wallet-service \
+              --zip-file fileb://wallet-service.zip \
+              --region ${{ env.AWS_REGION }} \
+              --no-cli-pager
+            echo "✅ Updated loglineos-wallet-service"
+          else
+            echo "⚠️  loglineos-wallet-service not found, skipping"
+          fi
+          rm -f wallet-service.zip
+
+      - name: Deploy CLI Service
+        run: |
+          echo "📦 Building CLI Service..."
+          cd lambda/cli_service
+          if [ -f "package.json" ]; then
+            npm install --production
+          fi
+          zip -r ../../cli-service.zip . -x "*.git*" "*.md" "*.test.js" "node_modules/.cache/*" -q
+          cd ../..
+          
+          if aws lambda get-function --function-name loglineos-cli-service --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
+            aws lambda update-function-code \
+              --function-name loglineos-cli-service \
+              --zip-file fileb://cli-service.zip \
+              --region ${{ env.AWS_REGION }} \
+              --no-cli-pager
+            echo "✅ Updated loglineos-cli-service"
+          else
+            echo "⚠️  loglineos-cli-service not found, skipping"
+          fi
+          rm -f cli-service.zip
+
+      - name: Deploy Auth Authorizer
+        run: |
+          echo "📦 Building Auth Authorizer..."
+          cd lambda/auth_api_key_authorizer
+          if [ -f "package.json" ]; then
+            npm install --production
+          fi
+          zip -r ../../authorizer.zip . -x "*.git*" "*.md" "*.test.js" "node_modules/.cache/*" -q
+          cd ../..
+          
+          if aws lambda get-function --function-name loglineos-auth-authorizer --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
+            aws lambda update-function-code \
+              --function-name loglineos-auth-authorizer \
+              --zip-file fileb://authorizer.zip \
+              --region ${{ env.AWS_REGION }} \
+              --no-cli-pager
+            echo "✅ Updated loglineos-auth-authorizer"
+          else
+            echo "⚠️  loglineos-auth-authorizer not found, skipping"
+          fi
+          rm -f authorizer.zip
+
+      - name: Deploy Email Service
+        run: |
+          echo "📦 Building Email Service..."
+          cd lambda/email_service
+          if [ -f "package.json" ]; then
+            npm install --production
+          fi
+          zip -r ../../email-service.zip . -x "*.git*" "*.md" "*.test.js" "node_modules/.cache/*" -q
+          cd ../..
+          
+          if aws lambda get-function --function-name loglineos-email-service --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
+            aws lambda update-function-code \
+              --function-name loglineos-email-service \
+              --zip-file fileb://email-service.zip \
+              --region ${{ env.AWS_REGION }} \
+              --no-cli-pager
+            echo "✅ Updated loglineos-email-service"
+          else
+            echo "⚠️  loglineos-email-service not found, skipping"
+          fi
+          rm -f email-service.zip
+
+      - name: Deploy Onboard Agent
+        run: |
+          echo "📦 Building Onboard Agent..."
+          cd lambda/onboard_agent
+          if [ -f "package.json" ]; then
+            npm install --production
+          fi
+          zip -r ../../onboard-agent.zip . -x "*.git*" "*.md" "*.test.js" "node_modules/.cache/*" -q
+          cd ../..
+          
+          if aws lambda get-function --function-name loglineos-onboard-agent --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
+            aws lambda update-function-code \
+              --function-name loglineos-onboard-agent \
+              --zip-file fileb://onboard-agent.zip \
+              --region ${{ env.AWS_REGION }} \
+              --no-cli-pager
+            echo "✅ Updated loglineos-onboard-agent"
+          else
+            echo "⚠️  loglineos-onboard-agent not found, skipping"
+          fi
+          rm -f onboard-agent.zip
+
+      - name: Deployment Summary
+        run: |
+          echo "✅ Deployment complete!"
+          echo ""
+          echo "📊 Deployed Functions:"
+          echo "  Legacy:"
+          echo "    - loglineos-stage0-loader"
+          echo "    - loglineos-db-migration"
+          echo "    - loglineos-diagnostic"
+          echo "  New:"
+          echo "    - loglineos-auth-service"
+          echo "    - loglineos-wallet-service"
+          echo "    - loglineos-cli-service"
+          echo "    - loglineos-auth-authorizer"
+          echo "    - loglineos-email-service"
+          echo "    - loglineos-onboard-agent"
+
+  deploy-terraform:
+    name: Deploy Infrastructure (Terraform)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[terraform]')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.6.0'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: terraform
+        run: terraform plan -var="environment=dev"
+
+      - name: Terraform Apply
+        working-directory: terraform
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        run: terraform apply -auto-approve -var="environment=dev"
+
