@@ -5,7 +5,8 @@
   "scripts": {
     "spans:transform": "node scripts/github-to-spans.js",
     "spans:sync": "node scripts/sync-spans-to-ledger.js",
-    "verify:kernels": "node scripts/verify-kernels-in-db.js"
+    "verify:kernels": "node scripts/verify-kernels-in-db.js",
+    "ledger:xray": "node scripts/ledger-xray.js"
   },
   "dependencies": {
     "@noble/hashes": "^1.4.0",
