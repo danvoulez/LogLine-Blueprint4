@@ -516,52 +516,59 @@ async function handleKeyRequest(event) {
     }
   }
   
-  // Create api_key_request span
+  // LEDGER-NATIVE: Apenas criar span api_key_request
+  // Kernel api_key_issuer vai processar e criar o token
+  const requestId = `span:api_key_request:${randomBytes(16).toString('hex')}`;
   const requestSpan = {
+    id: requestId,
+    seq: 0,
     entity_type: 'api_key_request',
     who: 'user:self',
     did: 'requested',
     this: 'security.api_key',
+    at: new Date().toISOString(),
+    status: 'pending',
+    tenant_id: tenant_id,
+    visibility: 'tenant',
     metadata: {
       email: email,
       tenant_id: tenant_id,
       device_info: device_info || {},
-      requested_scopes: scopes || []
-    }
+      requested_scopes: scopes || ['wallet.open', 'span.sign', 'cli.memory.add', 'cli.memory.search', 'cli.ask'],
+      law: {
+        scope: 'api_key',
+        targets: ['api_key_issuer:1.0.0'],
+        triage: 'auto'
+      }
+    },
+    owner_id: email
   };
   
+  // Store span in ledger
   if (process.env.API_GATEWAY_URL) {
     try {
       await storeSpanInLedger(requestSpan, process.env.API_GATEWAY_URL, process.env.BOOTSTRAP_TOKEN || '');
     } catch (err) {
       console.warn('Failed to store api_key_request span:', err.message);
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: 'Failed to store request in ledger' })
+      };
     }
+  } else {
+    // Fallback: store directly if no API URL (for testing)
+    console.warn('No API_GATEWAY_URL, span not stored');
   }
   
-  // Issue token
-  const defaultScopes = scopes || ['wallet.open', 'span.sign', 'cli.memory.add', 'cli.memory.search', 'cli.ask'];
-  const issueEvent = {
-    body: JSON.stringify({
-      wallet_id: walletId,
-      tenant_id: tenant_id,
-      scopes: defaultScopes,
-      ttl_hours: 720,
-      description: `CLI token for ${email}`
-    }),
-    requestContext: { authorizer: { wallet_id: 'system' } }
-  };
-  
-  const issueResult = await handleIssue(issueEvent);
-  const issueBody = JSON.parse(issueResult.body);
-  
+  // Return request ID - client will check status later
   return {
-    statusCode: 200,
+    statusCode: 202, // Accepted (async processing)
     body: JSON.stringify({
       ok: true,
-      token: issueBody.token,
-      wallet_id: walletId,
-      exp: issueBody.exp,
-      spans_created: ['api_key_request', 'wallet_opened', 'api_token_issued']
+      request_id: requestId,
+      status: 'pending',
+      message: 'API key request submitted. Kernel will process and create token.',
+      check_status: `/auth/keys/status/${requestId}`
     })
   };
 }
@@ -824,6 +831,99 @@ async function handleMagicVerify(event) {
 }
 
 /**
+ * GET /auth/keys/status/{request_id}
+ * Check status of API key request and get token if ready
+ */
+async function handleKeyStatus(event) {
+  const requestId = event.pathParameters?.request_id || event.path?.split('/').pop();
+  
+  if (!requestId) {
+    return { statusCode: 400, body: JSON.stringify({ error: 'request_id required' }) };
+  }
+  
+  // Query ledger for request status
+  const { Client } = require('pg');
+  const { SecretsManager } = require('@aws-sdk/client-secrets-manager');
+  const secrets = new SecretsManager({ region: process.env.AWS_REGION || 'us-east-1' });
+  
+  let client;
+  try {
+    const dbSecret = await secrets.getSecretValue({ SecretId: process.env.DB_SECRET_ARN });
+    const dbCfg = JSON.parse(dbSecret.SecretString);
+    client = new Client({
+      host: dbCfg.host,
+      database: dbCfg.database,
+      user: dbCfg.username,
+      password: dbCfg.password,
+      ssl: { rejectUnauthorized: false }
+    });
+    await client.connect();
+    
+    // Get request
+    const { rows: requestRows } = await client.query(`
+      SELECT * FROM ledger.visible_timeline
+      WHERE id = $1 AND entity_type = 'api_key_request'
+      ORDER BY seq DESC LIMIT 1
+    `, [requestId]);
+    
+    if (requestRows.length === 0) {
+      await client.end();
+      return { statusCode: 404, body: JSON.stringify({ error: 'Request not found' }) };
+    }
+    
+    const request = requestRows[0];
+    
+    // If completed, find api_token_issued span
+    if (request.status === 'completed') {
+      const { rows: tokenRows } = await client.query(`
+        SELECT * FROM ledger.visible_timeline
+        WHERE links->>'caused_by' = $1
+          AND entity_type = 'api_token_issued'
+        ORDER BY at DESC LIMIT 1
+      `, [requestId]);
+      
+      await client.end();
+      
+      if (tokenRows.length > 0) {
+        const tokenSpan = tokenRows[0];
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            request_id: requestId,
+            status: 'completed',
+            token: tokenSpan.metadata?.token, // PLAINTEXT - apenas aqui!
+            token_hash: tokenSpan.metadata?.token_hash,
+            wallet_id: tokenSpan.metadata?.wallet_id,
+            scopes: tokenSpan.metadata?.scopes,
+            exp: tokenSpan.metadata?.exp,
+            token_span_id: tokenSpan.id
+          })
+        };
+      }
+    }
+    
+    await client.end();
+    
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        request_id: requestId,
+        status: request.status,
+        message: request.status === 'pending' ? 'Request is being processed by kernel' : 'Request status: ' + request.status
+      })
+    };
+    
+  } catch (err) {
+    if (client) await client.end();
+    console.error('Failed to check key status:', err.message);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: 'Failed to check status', details: err.message })
+    };
+  }
+}
+
+/**
  * Main handler
  */
 exports.handler = async (event) => {
@@ -854,7 +954,9 @@ exports.handler = async (event) => {
         return await handleAttest(event);
       }
     } else if (method === 'GET') {
-      if (path.includes('/auth/magic/verify')) {
+      if (path.includes('/auth/keys/status/')) {
+        return await handleKeyStatus(event);
+      } else if (path.includes('/auth/magic/verify')) {
         return await handleMagicVerify(event);
       } else if (path.includes('/auth/keys/list')) {
         return await handleList(event);
