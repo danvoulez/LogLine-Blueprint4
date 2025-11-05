@@ -1,0 +1,137 @@
+name: Deploy via Ledger (Constitution v1.1)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  NODE_VERSION: '18'
+
+jobs:
+  create-deployment-spans:
+    name: Create Deployment Request Spans
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for git diff
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Detect changed files
+        id: changed-files
+        run: |
+          if [ "${{ github.event_name }}" == "push" ]; then
+            CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} || echo "")
+          else
+            CHANGED="all"
+          fi
+          echo "files=$CHANGED" >> $GITHUB_OUTPUT
+
+      - name: Create deployment request spans
+        run: |
+          node scripts/create-deployment-spans.js
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
+          ENVIRONMENT: dev
+          CHANGED_FILES: ${{ steps.changed-files.outputs.files }}
+          DEPLOY_ALL: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+
+      - name: Upload spans artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-spans
+          path: .ledger/spans/deployment_request.ndjson
+          retention-days: 1
+
+  sync-spans-to-ledger:
+    name: Send Spans to Ledger
+    needs: create-deployment-spans
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download spans artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: deployment-spans
+          path: .ledger/spans
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Send spans to ledger
+        run: |
+          node scripts/sync-spans-to-ledger.js
+        env:
+          DB_SECRET_ARN: ${{ secrets.DB_SECRET_ARN }}
+          API_GATEWAY_URL: ${{ secrets.API_GATEWAY_URL }}
+          API_KEY: ${{ secrets.API_KEY }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+
+      - name: Trigger deployment executor
+        run: |
+          echo "📋 Deployment requests sent to ledger"
+          echo "🔄 Stage-0 will execute deployment_executor kernel"
+          echo "⏰ Kernel reads deployment_request spans and deploys to AWS"
+          echo ""
+          echo "To check status:"
+          echo "  SELECT * FROM ledger.visible_timeline WHERE entity_type='deployment_request' ORDER BY at DESC LIMIT 10;"
+          echo "  SELECT * FROM ledger.visible_timeline WHERE entity_type='deployment_completed' ORDER BY at DESC LIMIT 10;"
+
+  # Optional: Manual trigger to execute deployment executor kernel
+  trigger-deployment:
+    name: Trigger Deployment Executor (Manual)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Invoke deployment executor kernel
+        run: |
+          aws lambda invoke \
+            --function-name loglineos-stage0-loader \
+            --payload '{"boot_function_id":"00000000-0000-4000-8000-000000000020","input":{"limit":10},"tenant_id":"system","user_id":"system:github_actions"}' \
+            --cli-binary-format raw-in-base64-out \
+            response.json
+          
+          cat response.json | jq
+          
+          echo ""
+          echo "✅ Deployment executor kernel invoked"
+          echo "   Check deployment_completed spans in ledger for results"
+
