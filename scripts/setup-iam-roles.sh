@@ -192,12 +192,45 @@ ONBOARD_POLICY=$(cat <<EOF
 EOF
 )
 
+# Email Service policy
+EMAIL_POLICY=$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ses:SendEmail",
+        "ses:SendRawEmail"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:PutItem",
+        "dynamodb:GetItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:Scan",
+        "dynamodb:Query"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/email_verifications",
+        "arn:aws:dynamodb:${AWS_REGION}:${ACCOUNT_ID}:table/email_verifications/index/*"
+      ]
+    }
+  ]
+}
+EOF
+)
+
 # Create roles
 create_role "loglineos-auth-service-role" "$AUTH_POLICY"
 create_role "loglineos-wallet-service-role" "$WALLET_POLICY"
 create_role "loglineos-cli-service-role" "$CLI_POLICY"
 create_role "loglineos-auth-authorizer-role" "$AUTHORIZER_POLICY"
 create_role "loglineos-onboard-agent-role" "$ONBOARD_POLICY"
+create_role "loglineos-email-service-role" "$EMAIL_POLICY"
 
 echo "✅ IAM roles created"
 echo ""

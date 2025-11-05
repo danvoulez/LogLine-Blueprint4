@@ -231,13 +231,50 @@ async function handleIdentityRegister(event) {
   // Store nonce temporarily (in DynamoDB or return for client to sign)
   // For now, return nonce for client to attest
   
+  // Optional: Send verification email if email provided
+  // (Email service is optional - onboarding works without it)
+  if (email && process.env.EMAIL_SERVICE_URL) {
+    try {
+      const https = require('https');
+      const http = require('http');
+      const url = require('url');
+      
+      const emailUrl = process.env.EMAIL_SERVICE_URL;
+      const urlObj = new URL(emailUrl.startsWith('http') ? emailUrl : `https://${emailUrl}`);
+      const client = urlObj.protocol === 'https:' ? https : http;
+      
+      const postData = JSON.stringify({
+        email: email,
+        display_name: display_name
+      });
+      
+      const options = {
+        hostname: urlObj.hostname,
+        port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+        path: '/email/verify/send',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(postData)
+        }
+      };
+      
+      // Fire and forget - don't block onboarding if email fails
+      client.request(options, () => {}).on('error', () => {}).write(postData).end();
+    } catch (err) {
+      console.warn('Failed to send verification email:', err.message);
+      // Don't fail onboarding if email fails
+    }
+  }
+  
   return {
     statusCode: 200,
     body: JSON.stringify({
       ok: true,
       identity_span: identitySpan,
       attestation_nonce: nonce,
-      next_step: 'POST /auth/attest with signed nonce'
+      next_step: 'POST /auth/attest with signed nonce',
+      email_verification_sent: !!email && !!process.env.EMAIL_SERVICE_URL
     })
   };
 }
@@ -407,6 +444,386 @@ async function handleList(event) {
 }
 
 /**
+ * POST /auth/keys/request
+ * CLI requests API key (creates wallet automatically)
+ */
+async function handleKeyRequest(event) {
+  const body = JSON.parse(event.body || '{}');
+  const { email, tenant_id, device_info, scopes } = body;
+  
+  if (!email || !tenant_id) {
+    return { statusCode: 400, body: JSON.stringify({ error: 'email, tenant_id required' }) };
+  }
+  
+  // Generate wallet_id from email
+  const walletId = `wlt_${tenant_id}_${email.split('@')[0]}`;
+  
+  // Check if wallet exists
+  const { DynamoDBClient: WalletDynamoDB } = require('@aws-sdk/client-dynamodb');
+  const { DynamoDBDocumentClient: WalletDocClient, GetCommand: WalletGetCommand } = require('@aws-sdk/lib-dynamodb');
+  const walletClient = WalletDocClient.from(new WalletDynamoDB({ region: process.env.AWS_REGION || 'us-east-1' }));
+  
+  let walletExists = false;
+  try {
+    const walletResult = await walletClient.send(new WalletGetCommand({
+      TableName: process.env.WALLETS_TABLE || 'wallets',
+      Key: { wallet_id: walletId }
+    }));
+    walletExists = !!walletResult.Item;
+  } catch (err) {
+    console.warn('Wallet check failed:', err.message);
+  }
+  
+  // Create wallet if not exists
+  if (!walletExists) {
+    try {
+      const { PutCommand: WalletPutCommand } = require('@aws-sdk/lib-dynamodb');
+      await walletClient.send(new WalletPutCommand({
+        TableName: process.env.WALLETS_TABLE || 'wallets',
+        Item: {
+          wallet_id: walletId,
+          owner_id: email,
+          tenant_id: tenant_id,
+          status: 'active',
+          created_at: Math.floor(Date.now() / 1000),
+          items: {}
+        }
+      }));
+      
+      // Create wallet_opened span
+      const walletSpan = {
+        entity_type: 'wallet_opened',
+        who: 'system:auth_service',
+        did: 'opened',
+        this: 'wallet',
+        metadata: {
+          wallet_id: walletId,
+          owner_id: email,
+          tenant_id: tenant_id
+        }
+      };
+      
+      if (process.env.API_GATEWAY_URL) {
+        try {
+          await storeSpanInLedger(walletSpan, process.env.API_GATEWAY_URL, process.env.BOOTSTRAP_TOKEN || '');
+        } catch (err) {
+          console.warn('Failed to store wallet_opened span:', err.message);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to create wallet:', err.message);
+      return { statusCode: 500, body: JSON.stringify({ error: 'Failed to create wallet' }) };
+    }
+  }
+  
+  // Create api_key_request span
+  const requestSpan = {
+    entity_type: 'api_key_request',
+    who: 'user:self',
+    did: 'requested',
+    this: 'security.api_key',
+    metadata: {
+      email: email,
+      tenant_id: tenant_id,
+      device_info: device_info || {},
+      requested_scopes: scopes || []
+    }
+  };
+  
+  if (process.env.API_GATEWAY_URL) {
+    try {
+      await storeSpanInLedger(requestSpan, process.env.API_GATEWAY_URL, process.env.BOOTSTRAP_TOKEN || '');
+    } catch (err) {
+      console.warn('Failed to store api_key_request span:', err.message);
+    }
+  }
+  
+  // Issue token
+  const defaultScopes = scopes || ['wallet.open', 'span.sign', 'cli.memory.add', 'cli.memory.search', 'cli.ask'];
+  const issueEvent = {
+    body: JSON.stringify({
+      wallet_id: walletId,
+      tenant_id: tenant_id,
+      scopes: defaultScopes,
+      ttl_hours: 720,
+      description: `CLI token for ${email}`
+    }),
+    requestContext: { authorizer: { wallet_id: 'system' } }
+  };
+  
+  const issueResult = await handleIssue(issueEvent);
+  const issueBody = JSON.parse(issueResult.body);
+  
+  return {
+    statusCode: 200,
+    body: JSON.stringify({
+      ok: true,
+      token: issueBody.token,
+      wallet_id: walletId,
+      exp: issueBody.exp,
+      spans_created: ['api_key_request', 'wallet_opened', 'api_token_issued']
+    })
+  };
+}
+
+/**
+ * POST /auth/keys/recover
+ * Recover API key (reissue)
+ */
+async function handleKeyRecover(event) {
+  const body = JSON.parse(event.body || '{}');
+  const { email, tenant_id } = body;
+  
+  if (!email || !tenant_id) {
+    return { statusCode: 400, body: JSON.stringify({ error: 'email, tenant_id required' }) };
+  }
+  
+  const walletId = `wlt_${tenant_id}_${email.split('@')[0]}`;
+  
+  // Check wallet exists
+  const { DynamoDBClient: WalletDynamoDB } = require('@aws-sdk/client-dynamodb');
+  const { DynamoDBDocumentClient: WalletDocClient, GetCommand: WalletGetCommand } = require('@aws-sdk/lib-dynamodb');
+  const walletClient = WalletDocClient.from(new WalletDynamoDB({ region: process.env.AWS_REGION || 'us-east-1' }));
+  
+  const walletResult = await walletClient.send(new WalletGetCommand({
+    TableName: process.env.WALLETS_TABLE || 'wallets',
+    Key: { wallet_id: walletId }
+  }));
+  
+  if (!walletResult.Item) {
+    return { statusCode: 404, body: JSON.stringify({ error: 'Wallet not found' }) };
+  }
+  
+  // Revoke old tokens
+  await handleRevoke({ body: JSON.stringify({ wallet_id: walletId }) });
+  
+  // Issue new token
+  const issueEvent = {
+    body: JSON.stringify({
+      wallet_id: walletId,
+      tenant_id: tenant_id,
+      scopes: ['wallet.open', 'span.sign', 'cli.memory.add', 'cli.memory.search', 'cli.ask'],
+      ttl_hours: 720,
+      description: `Recovered CLI token for ${email}`
+    }),
+    requestContext: { authorizer: { wallet_id: 'system' } }
+  };
+  
+  const issueResult = await handleIssue(issueEvent);
+  const issueBody = JSON.parse(issueResult.body);
+  
+  return {
+    statusCode: 200,
+    body: JSON.stringify({
+      ok: true,
+      token: issueBody.token,
+      wallet_id: walletId,
+      exp: issueBody.exp,
+      old_token_revoked: true
+    })
+  };
+}
+
+/**
+ * POST /auth/magic/send
+ * Send magic link via email
+ */
+async function handleMagicSend(event) {
+  const body = JSON.parse(event.body || '{}');
+  const { email, tenant_id, redirect_url } = body;
+  
+  if (!email) {
+    return { statusCode: 400, body: JSON.stringify({ error: 'email required' }) };
+  }
+  
+  const finalTenantId = tenant_id || email.split('@')[1].split('.')[0];
+  const magicToken = `magic_${randomBytes(24).toString('base64url')}`;
+  const expiresAt = Math.floor(Date.now() / 1000) + (15 * 60);
+  
+  // Store magic token
+  const { DynamoDBClient: MagicDynamoDB } = require('@aws-sdk/client-dynamodb');
+  const { DynamoDBDocumentClient: MagicDocClient, PutCommand: MagicPutCommand } = require('@aws-sdk/lib-dynamodb');
+  const magicClient = MagicDocClient.from(new MagicDynamoDB({ region: process.env.AWS_REGION || 'us-east-1' }));
+  
+  await magicClient.send(new MagicPutCommand({
+    TableName: process.env.MAGIC_LINKS_TABLE || 'magic_links',
+    Item: {
+      token: magicToken,
+      email: email,
+      tenant_id: finalTenantId,
+      expires_at: expiresAt,
+      status: 'pending',
+      redirect_url: redirect_url || 'https://app.loglineos.com/dashboard',
+      created_at: Math.floor(Date.now() / 1000)
+    }
+  }));
+  
+  // Send email
+  if (process.env.EMAIL_SERVICE_URL) {
+    try {
+      const https = require('https');
+      const http = require('http');
+      const url = require('url');
+      
+      const emailUrl = process.env.EMAIL_SERVICE_URL;
+      const urlObj = new URL(emailUrl.startsWith('http') ? emailUrl : `https://${emailUrl}`);
+      const client = urlObj.protocol === 'https:' ? https : http;
+      
+      const magicLinkUrl = `${process.env.API_GATEWAY_URL || 'https://api.loglineos.com'}/auth/magic/verify?token=${magicToken}&redirect=${encodeURIComponent(redirect_url || 'https://app.loglineos.com/dashboard')}`;
+      
+      const postData = JSON.stringify({
+        email: email,
+        event_type: 'magic_link',
+        details: { magic_link: magicLinkUrl, expires_in_minutes: 15 }
+      });
+      
+      const options = {
+        hostname: urlObj.hostname,
+        port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+        path: '/email/notify',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(postData)
+        }
+      };
+      
+      client.request(options, () => {}).on('error', () => {}).write(postData).end();
+    } catch (err) {
+      console.warn('Failed to send magic link email:', err.message);
+    }
+  }
+  
+  return {
+    statusCode: 200,
+    body: JSON.stringify({ ok: true, message: 'Magic link sent to email' })
+  };
+}
+
+/**
+ * GET /auth/magic/verify
+ * Verify magic link and authenticate
+ */
+async function handleMagicVerify(event) {
+  const token = event.queryStringParameters?.token;
+  const redirect = event.queryStringParameters?.redirect || 'https://app.loglineos.com/dashboard';
+  
+  if (!token) {
+    return {
+      statusCode: 302,
+      headers: { 'Location': `${redirect}?error=missing_token` },
+      body: ''
+    };
+  }
+  
+  // Look up magic token
+  const { DynamoDBClient: MagicDynamoDB } = require('@aws-sdk/client-dynamodb');
+  const { DynamoDBDocumentClient: MagicDocClient, GetCommand: MagicGetCommand, UpdateCommand: MagicUpdateCommand } = require('@aws-sdk/lib-dynamodb');
+  const magicClient = MagicDocClient.from(new MagicDynamoDB({ region: process.env.AWS_REGION || 'us-east-1' }));
+  
+  const magicResult = await magicClient.send(new MagicGetCommand({
+    TableName: process.env.MAGIC_LINKS_TABLE || 'magic_links',
+    Key: { token: token }
+  }));
+  
+  if (!magicResult.Item || magicResult.Item.expires_at < Math.floor(Date.now() / 1000) || magicResult.Item.status === 'used') {
+    return {
+      statusCode: 302,
+      headers: { 'Location': `${redirect}?error=invalid_token` },
+      body: ''
+    };
+  }
+  
+  // Mark as used
+  await magicClient.send(new MagicUpdateCommand({
+    TableName: process.env.MAGIC_LINKS_TABLE || 'magic_links',
+    Key: { token: token },
+    UpdateExpression: 'SET #status = :used, used_at = :now',
+    ExpressionAttributeNames: { '#status': 'status' },
+    ExpressionAttributeValues: { ':used': 'used', ':now': Math.floor(Date.now() / 1000) }
+  }));
+  
+  const email = magicResult.Item.email;
+  const tenantId = magicResult.Item.tenant_id;
+  const walletId = `wlt_${tenantId}_${email.split('@')[0]}`;
+  
+  // Check if new user
+  const { DynamoDBClient: WalletDynamoDB } = require('@aws-sdk/client-dynamodb');
+  const { DynamoDBDocumentClient: WalletDocClient, GetCommand: WalletGetCommand, PutCommand: WalletPutCommand } = require('@aws-sdk/lib-dynamodb');
+  const walletClient = WalletDocClient.from(new WalletDynamoDB({ region: process.env.AWS_REGION || 'us-east-1' }));
+  
+  const walletResult = await walletClient.send(new WalletGetCommand({
+    TableName: process.env.WALLETS_TABLE || 'wallets',
+    Key: { wallet_id: walletId }
+  }));
+  
+  const isNewUser = !walletResult.Item;
+  
+  if (isNewUser) {
+    await walletClient.send(new WalletPutCommand({
+      TableName: process.env.WALLETS_TABLE || 'wallets',
+      Item: {
+        wallet_id: walletId,
+        owner_id: email,
+        tenant_id: tenantId,
+        status: 'active',
+        created_at: Math.floor(Date.now() / 1000),
+        items: {}
+      }
+    }));
+    
+    // Create spans
+    const identitySpan = {
+      entity_type: 'identity_registration',
+      who: 'user:self',
+      did: 'registered',
+      this: 'identity.user',
+      metadata: { email: email, tenant_id: tenantId, registration_method: 'magic_link' }
+    };
+    
+    const walletSpan = {
+      entity_type: 'wallet_opened',
+      who: 'system:auth_service',
+      did: 'opened',
+      this: 'wallet',
+      metadata: { wallet_id: walletId, owner_id: email, tenant_id: tenantId }
+    };
+    
+    if (process.env.API_GATEWAY_URL) {
+      try {
+        await storeSpanInLedger(identitySpan, process.env.API_GATEWAY_URL, process.env.BOOTSTRAP_TOKEN || '');
+        await storeSpanInLedger(walletSpan, process.env.API_GATEWAY_URL, process.env.BOOTSTRAP_TOKEN || '');
+      } catch (err) {
+        console.warn('Failed to store spans:', err.message);
+      }
+    }
+  }
+  
+  // Issue token
+  const issueEvent = {
+    body: JSON.stringify({
+      wallet_id: walletId,
+      tenant_id: tenantId,
+      scopes: ['wallet.open', 'span.sign', 'cli.memory.add', 'cli.memory.search', 'cli.ask'],
+      ttl_hours: 8760,
+      description: `UI token for ${email}`
+    }),
+    requestContext: { authorizer: { wallet_id: 'system' } }
+  };
+  
+  const issueResult = await handleIssue(issueEvent);
+  const issueBody = JSON.parse(issueResult.body);
+  
+  const redirectUrl = `${redirect}?token=${issueBody.token}&wallet_id=${walletId}&new_user=${isNewUser}`;
+  
+  return {
+    statusCode: 302,
+    headers: { 'Location': redirectUrl },
+    body: ''
+  };
+}
+
+/**
  * Main handler
  */
 exports.handler = async (event) => {
@@ -416,21 +833,30 @@ exports.handler = async (event) => {
     const path = event.path || event.requestContext?.path || '';
     const method = event.httpMethod || event.requestContext?.httpMethod || '';
     
-    // Route requests
     if (method === 'POST') {
-      if (path.includes('/auth/identity/register')) {
-        return await handleIdentityRegister(event);
-      } else if (path.includes('/auth/attest')) {
-        return await handleAttest(event);
+      if (path.includes('/auth/keys/request')) {
+        return await handleKeyRequest(event);
+      } else if (path.includes('/auth/keys/recover')) {
+        return await handleKeyRecover(event);
       } else if (path.includes('/auth/keys/issue')) {
         return await handleIssue(event);
       } else if (path.includes('/auth/keys/revoke')) {
         return await handleRevoke(event);
       } else if (path.includes('/auth/keys/rotate')) {
         return await handleRotate(event);
+      } else if (path.includes('/auth/keys/list')) {
+        return await handleList(event);
+      } else if (path.includes('/auth/magic/send')) {
+        return await handleMagicSend(event);
+      } else if (path.includes('/auth/identity/register')) {
+        return await handleIdentityRegister(event);
+      } else if (path.includes('/auth/attest')) {
+        return await handleAttest(event);
       }
     } else if (method === 'GET') {
-      if (path.includes('/auth/keys/list')) {
+      if (path.includes('/auth/magic/verify')) {
+        return await handleMagicVerify(event);
+      } else if (path.includes('/auth/keys/list')) {
         return await handleList(event);
       }
     }

@@ -122,6 +122,8 @@ const kid = `b3:${Buffer.from(kidHash).toString('hex')}`;
 
 **Endpoint:** `POST /auth/identity/register`
 
+**⚠️ Email é opcional:** O onboarding funciona sem email. Se email for fornecido, pode-se enviar email de verificação (opcional).
+
 **Request:**
 ```json
 {
