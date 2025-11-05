@@ -1,7 +1,7 @@
 {
-  "name": "loglineos-blueprint4",
+  "name": "loglineos-deploy",
   "version": "1.0.0",
-  "description": "LogLineOS Blueprint4 Implementation",
+  "description": "LogLineOS Deployment Infrastructure - Lambda functions, Terraform, CI/CD",
   "scripts": {
     "spans:transform": "node scripts/github-to-spans.js",
     "spans:sync": "node scripts/sync-spans-to-ledger.js",

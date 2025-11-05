@@ -2,8 +2,8 @@
 
 ## Nome Correto
 
-**Repositório:** `LogLine-Blueprint4`  
-**URL:** https://github.com/danvoulez/LogLine-Blueprint4  
+**Repositório:** `LogLine-Deploy`  
+**URL:** https://github.com/danvoulez/LogLine-Deploy  
 **Branch padrão:** `main`
 
 ## Status
@@ -15,14 +15,15 @@
 
 ## Verificar Workflow
 
-Acesse: **https://github.com/danvoulez/LogLine-Blueprint4/actions**
+Acesse: **https://github.com/danvoulez/LogLine-Deploy/actions**
 
 Você deve ver os workflows executando após cada push em `main`.
 
 ## Links Úteis
 
-- **Repositório:** https://github.com/danvoulez/LogLine-Blueprint4
-- **Actions:** https://github.com/danvoulez/LogLine-Blueprint4/actions
-- **Secrets:** https://github.com/danvoulez/LogLine-Blueprint4/settings/secrets/actions
-- **Settings:** https://github.com/danvoulez/LogLine-Blueprint4/settings
+- **Repositório:** https://github.com/danvoulez/LogLine-Deploy
+- **Actions:** https://github.com/danvoulez/LogLine-Deploy/actions
+- **Secrets:** https://github.com/danvoulez/LogLine-Deploy/settings/secrets/actions
+- **Settings:** https://github.com/danvoulez/LogLine-Deploy/settings
+- **Specs:** https://github.com/danvoulez/LogLine-Ruleset (Functional specifications)
 

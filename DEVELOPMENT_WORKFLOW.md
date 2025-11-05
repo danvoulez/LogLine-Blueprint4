@@ -190,7 +190,7 @@ Deploy automático na AWS
 ### Após Push
 
 1. **GitHub Actions:**
-   - Acesse: https://github.com/danvoulez/LogLine-Blueprint4/actions
+   - Acesse: https://github.com/danvoulez/LogLine-Deploy/actions
    - Veja workflow rodando
    - Verifique logs se falhar
 

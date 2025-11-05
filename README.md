@@ -1,6 +1,6 @@
-# LogLineOS Blueprint4
+# LogLineOS Deploy
 
-**Production-ready, ledger-only backend for spans, automations, policies, and prompts.**
+**Production-ready deployment infrastructure for LogLineOS: Lambda functions, Terraform, CI/CD, and deployment automation.**
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![AWS Lambda](https://img.shields.io/badge/AWS-Lambda-orange.svg)](https://aws.amazon.com/lambda/)
@@ -63,8 +63,8 @@ LogLineOS is a **universal, semantic, ledger-only backend** where every behavior
 ### 1. Clone & Install
 
 ```bash
-git clone https://github.com/danvoulez/LogLine-Blueprint4.git
-cd LogLine-Blueprint4
+git clone https://github.com/danvoulez/LogLine-Deploy.git
+cd LogLine-Deploy
 npm install
 ```
 
@@ -286,7 +286,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 📬 Contact
 
 - **GitHub**: [@danvoulez](https://github.com/danvoulez)
-- **Project**: [LogLine-Blueprint4](https://github.com/danvoulez/LogLine-Blueprint4)
+- **Project**: [LogLine-Deploy](https://github.com/danvoulez/LogLine-Deploy)
+- **Specs**: [LogLine-Ruleset](https://github.com/danvoulez/LogLine-Ruleset) - Functional specifications and blueprints
 
 ---
 

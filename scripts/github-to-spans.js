@@ -192,7 +192,7 @@ async function main() {
   const gitMetadata = {
     sha: process.env.GITHUB_SHA || 'local',
     ref: process.env.GITHUB_REF || 'refs/heads/main',
-    repo: process.env.GITHUB_REPOSITORY || 'loglineos-blueprint4',
+    repo: process.env.GITHUB_REPOSITORY || 'loglineos-deploy',
     author: process.env.GITHUB_ACTOR || 'system'
   };
   

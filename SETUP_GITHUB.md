@@ -1,11 +1,11 @@
-# 🚀 Setup GitHub e CI/CD - LogLineOS Blueprint4
+# 🚀 Setup GitHub e CI/CD - LogLineOS Deploy
 
 ## Passos para conectar ao GitHub
 
 ### 1. Criar repositório no GitHub
 
 1. Acesse: https://github.com/new
-2. Nome: `LogLine-Blueprint4` (ou `LogLineOS-Blueprint4` se preferir)
+2. Nome: `LogLine-Deploy`
 3. Owner: `danvoulez`
 4. Público ou Privado (sua escolha)
 5. NÃO inicialize com README (já temos um)
@@ -14,10 +14,10 @@
 
 ```bash
 # Adicionar remote
-git remote add origin https://github.com/danvoulez/LogLine-Blueprint4.git
+git remote add origin https://github.com/danvoulez/LogLine-Deploy.git
 
 # Ou se usar SSH:
-git remote add origin git@github.com:danvoulez/LogLineOS-Blueprint4.git
+git remote add origin git@github.com:danvoulez/LogLine-Deploy.git
 ```
 
 ### 3. Fazer primeiro commit e push
@@ -27,7 +27,7 @@ git remote add origin git@github.com:danvoulez/LogLineOS-Blueprint4.git
 git add .
 
 # Commit inicial
-git commit -m "Initial commit: LogLineOS Blueprint4 complete implementation"
+git commit -m "Initial commit: LogLineOS Deploy infrastructure"
 
 # Push para GitHub
 git branch -M main
@@ -36,7 +36,7 @@ git push -u origin main
 
 ### 4. Configurar Secrets no GitHub
 
-1. Acesse: https://github.com/danvoulez/LogLine-Blueprint4/settings/secrets/actions
+1. Acesse: https://github.com/danvoulez/LogLine-Deploy/settings/secrets/actions
 2. Adicione os seguintes secrets:
 
 ```

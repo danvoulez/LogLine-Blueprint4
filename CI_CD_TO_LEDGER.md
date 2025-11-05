@@ -106,7 +106,7 @@ O workflow é acionado quando:
 ```bash
 export GITHUB_SHA="$(git rev-parse HEAD)"
 export GITHUB_REF="$(git rev-parse --abbrev-ref HEAD)"
-export GITHUB_REPOSITORY="danvoulez/LogLine-Blueprint4"
+export GITHUB_REPOSITORY="danvoulez/LogLine-Deploy"
 
 node scripts/github-to-spans.js
 ```
