@@ -121,6 +121,132 @@ Every [service] artifact is a span:
 
 ---
 
+### **5.2 App Onboarding (API) — Ledger-Native**
+
+Two supported flows; both emit spans and are governed by manifest/laws.
+
+#### A) Via Stage-0 kernel (recommended)
+
+Requires scope: `kernel:app_enrollment:invoke`.
+
+```bash
+API="$API_URL"
+TENANT="acme"
+TOK="tok_acme_..."
+
+curl -sS -X POST "$API/api/boot?tenant=$TENANT" \
+  -H "Authorization: ApiKey $TOK" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "boot_function_id": "00000000-0000-4000-8000-000000000008",
+    "input": {
+      "action": "app_register",
+      "app_id": "myapp",
+      "display_name": "My App",
+      "owner_id": "you@acme.com",
+      "scopes": ["kernel:prompt_fetch:invoke","/api/spans:write"]
+    }
+  }'
+```
+
+Emitted spans: `app_registration` (+ optional `capability_grant`, `pact`, `slo_spec` by `onboard_agent`).
+
+#### B) Via CLI Service (if exposed)
+
+```bash
+curl -sS -X POST "$API/cli/app.register" \
+  -H "Authorization: ApiKey $TOK" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "app_id": "myapp",
+    "display_name": "My App",
+    "scopes": ["kernel:prompt_fetch:invoke","/api/spans:write"]
+  }'
+```
+
+Security: Authorizer validates ApiKey + scopes; Stage‑0 enforces `kernel:<name>:invoke` and emits `auth.decision` spans.
+
+#### C) Vercel Chat App (Official UI on Vercel) — App Spec
+
+**Goal**: Frontend oficial (Next.js/Vercel) que conversa com o Stage‑0 para consultar/escrever no ledger, com tool calling e execução de kernels, mantendo auditoria total.
+
+1) App Registration (Stage‑0)
+
+```bash
+API="$API_URL"; TENANT="acme"; TOK="tok_acme_..."
+
+curl -sS -X POST "$API/api/boot?tenant=$TENANT" \
+  -H "Authorization: ApiKey $TOK" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "boot_function_id": "00000000-0000-4000-8000-000000000008",
+    "input": {
+      "action": "app_register",
+      "app_id": "vercel_chat",
+      "display_name": "LogLine Chat (Vercel)",
+      "owner_id": "ops@acme",
+      "scopes": [
+        "/api/spans:write",
+        "kernel:prompt_runner:invoke",
+        "kernel:build_prompt:invoke",
+        "kernel:memory_upsert:invoke",
+        "kernel:memory_search:invoke"
+      ]
+    }
+  }'
+```
+
+Emits: `app_registration` (e o `onboard_agent` pode criar `capability_grant`, `pact`, `slo_spec`).
+
+2) Auth (UI, sem senha)
+
+- Magic link: `POST /auth/magic/send { email }` → link; `GET /auth/magic/verify?token=...`
+- Primeiro login: cria wallet + key e emite `api_token_issued` (TTL curto); persistir em cookie HTTP‑only (server‑side).
+- Rotação/recuperação: use `POST /auth/keys/request` (ledger‑native, assíncrono) + `GET /auth/keys/status?id=...`.
+
+3) Tool Calls → CaaS
+
+- Mapeie tools do LLM para endpoints `/cli/*` (ex.: `memory.add`, `memory.search`, `ask`, `run`).
+- Ver `TOOL_CALLS_AND_CLI_SERVICE.md` para schema e handler.
+
+4) Stage‑0 Invocation (backend‑only)
+
+- O frontend nunca chama Stage‑0 direto. Crie uma rota server (`/api/boot`) que:
+  - valida sessão/cookie → resolve ApiKey do app/usuário;
+  - chama `POST /api/boot` com `boot_function_id` + `input`;
+  - retorna resultado (ou 202 se assíncrono) e registra `auth.decision`.
+
+5) Streaming
+
+- Respostas de chat: faça streaming do provedor via `prompt_runner_kernel` (SSE) ou use Vercel Edge/Node streaming. Em paralelo, emita `prompt_run` com `compiled_hash`, `tool_use_count`, `citations`.
+- Atualizações de ledger/time‑line: opcionalmente consuma `GET /api/timeline/stream` para UI reativa.
+
+6) Security
+
+- Headers por request: `X-LogLine-Session`, `X-LogLine-Memory`, `X-LogLine-Sensitivity`.
+- RLS: toda rota server define `app.user_id`/`app.tenant_id` para consultas ao ledger.
+- Rate limits: por `tenant_id`/`app_id` no API Gateway + leis de rate no manifest.
+- Auditoria: toda decisão gera `auth.decision` (Authorizer e Stage‑0). Sem `break_glass` para UI.
+
+7) Minimal Scopes (recommended)
+
+```json
+[
+  "/api/spans:write",
+  "kernel:prompt_runner:invoke",
+  "kernel:build_prompt:invoke",
+  "kernel:memory_upsert:invoke",
+  "kernel:memory_search:invoke"
+]
+```
+
+8) Deployment Notes (Vercel)
+
+- Variáveis Ambiente (Server): `API_URL`, `TENANT_ID`, opcional `API_TOKEN_COOKIE_NAME`.
+- Rota server (`/api/chat`): compõe prompt via `build_prompt_kernel`, executa `prompt_runner_kernel`, faz stream, grava `prompt_run`.
+- Rota server (`/api/tool-call`): recebe tool do LLM → chama `/cli/*` correspondente (CaaS).
+
+
 ### **6. Kernels / Kernels**
 
 **[service]_[operation]_kernel**
