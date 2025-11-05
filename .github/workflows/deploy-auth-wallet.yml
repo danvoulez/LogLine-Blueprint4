@@ -1,0 +1,98 @@
+name: Deploy Auth/Wallet/CLI (Upsert)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment name (e.g., dev, prod)"
+        required: false
+        default: dev
+  push:
+    branches: [ main ]
+    paths:
+      - 'lambda/**'
+      - 'terraform/**'
+      - 'scripts/**'
+      - '.github/workflows/deploy-auth-wallet.yml'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Apply (idempotent)
+        working-directory: terraform
+        env:
+          TF_INPUT: 0
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -var="environment=${{ github.event.inputs.environment || 'dev' }}"
+
+      - name: Install lambda deps and zip
+        run: |
+          set -euo pipefail
+          ( cd lambda/auth_service && npm ci --omit=dev && zip -qr ../auth_service.zip . )
+          ( cd lambda/wallet_service && npm ci --omit=dev && zip -qr ../wallet_service.zip . )
+          ( cd lambda/cli_service && npm ci --omit=dev && zip -qr ../cli_service.zip . )
+          ( cd lambda/auth_api_key_authorizer && npm ci --omit=dev && zip -qr ../auth_api_key_authorizer.zip . )
+          ( cd lambda/onboard_agent && npm ci --omit=dev && zip -qr ../onboard_agent.zip . )
+          ( cd lambda/email_service && npm ci --omit=dev && zip -qr ../email_service.zip . )
+
+      - name: Upsert Lambdas (create if missing, else update)
+        shell: bash
+        run: |
+          set -euo pipefail
+          role_arn() { aws iam get-role --role-name "$1" --query 'Role.Arn' --output text; }
+          upsert() {
+            local NAME="$1" ZIP="$2" ROLE_NAME="$3"
+            local ROLE_ARN; ROLE_ARN=$(role_arn "$ROLE_NAME")
+            if aws lambda get-function --function-name "$NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+              aws lambda update-function-code --function-name "$NAME" --zip-file "fileb://lambda/$ZIP" --region "$AWS_REGION" >/dev/null
+              echo "Updated $NAME"
+            else
+              aws lambda create-function --function-name "$NAME" --runtime nodejs18.x --role "$ROLE_ARN" --handler index.handler --zip-file "fileb://lambda/$ZIP" --region "$AWS_REGION" >/dev/null
+              echo "Created $NAME"
+            fi
+          }
+          ./scripts/setup-iam-roles.sh
+          upsert loglineos-auth-service        auth_service.zip            loglineos-auth-service-role
+          upsert loglineos-wallet-service      wallet_service.zip          loglineos-wallet-service-role
+          upsert loglineos-cli-service         cli_service.zip             loglineos-cli-service-role
+          upsert loglineos-auth-authorizer     auth_api_key_authorizer.zip loglineos-auth-authorizer-role
+          upsert loglineos-onboard-agent       onboard_agent.zip           loglineos-onboard-agent-role
+          upsert loglineos-email-service       email_service.zip           loglineos-email-service-role
+
+      - name: Set Lambda environment variables
+        run: |
+          ./scripts/deploy-auth-wallet.sh ${{ github.event.inputs.environment || 'dev' }}
+
+      - name: Verify
+        run: |
+          aws lambda list-functions --region "$AWS_REGION" --query 'Functions[?starts_with(FunctionName, `loglineos-`)].FunctionName'
+
+
