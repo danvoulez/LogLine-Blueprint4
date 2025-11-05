@@ -68,6 +68,14 @@ exports.handler = async (event) => {
       const neededScope = `kernel:${kernelName}:invoke`;
       
       if (!scopes.includes(neededScope)) {
+        // emit auth.decision (denied) at kernel level
+        await insertSpan(client, {
+          id: require('crypto').randomUUID(), seq:0,
+          entity_type: 'auth.decision', who: 'edge:stage0', did: 'evaluated', this: 'kernel.authz',
+          at: new Date().toISOString(), status: 'denied',
+          tenant_id: fnSpan.tenant_id,
+          metadata: { reason: 'insufficient_scope_for_kernel', needed: neededScope, has: scopes, kernel: kernelName, wallet_id: authorizerContext.wallet_id || null }
+        });
         return {
           statusCode: 403,
           body: JSON.stringify({
@@ -78,6 +86,14 @@ exports.handler = async (event) => {
           })
         };
       }
+      // emit auth.decision (permitted) at kernel level
+      await insertSpan(client, {
+        id: require('crypto').randomUUID(), seq:0,
+        entity_type: 'auth.decision', who: 'edge:stage0', did: 'evaluated', this: 'kernel.authz',
+        at: new Date().toISOString(), status: 'permitted',
+        tenant_id: fnSpan.tenant_id,
+        metadata: { reason: 'ok', needed: neededScope, kernel: kernelName, wallet_id: authorizerContext.wallet_id || null }
+      });
     }
     
     // 3. Verify cryptographic integrity (if span has crypto fields)

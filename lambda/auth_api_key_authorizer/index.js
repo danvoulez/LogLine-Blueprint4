@@ -14,6 +14,7 @@ const { DynamoDBDocumentClient, GetCommand, QueryCommand } = require('@aws-sdk/l
 const { SecretsManager } = require('@aws-sdk/client-secrets-manager');
 const { createHmac } = require('crypto');
 const argon2 = require('argon2');
+const https = require('https');
 
 const dynamoClient = DynamoDBDocumentClient.from(new DynamoDBClient({ region: process.env.AWS_REGION || 'us-east-1' }));
 const secretsManager = new SecretsManager({ region: process.env.AWS_REGION || 'us-east-1' });
@@ -42,6 +43,35 @@ const allow = (resource, context, cacheKey) =>
 
 const deny = (reason) => 
   generatePolicy('Deny', '*', 'anon', { reason }, undefined);
+
+/**
+ * Post a span to ledger via API Gateway
+ */
+const postSpan = (span) => new Promise((resolve, reject) => {
+  const baseUrl = process.env.API_GATEWAY_URL;
+  const bootstrap = process.env.BOOTSTRAP_TOKEN || '';
+  if (!baseUrl) return resolve(false);
+
+  const url = new URL('/api/spans', baseUrl);
+  const data = JSON.stringify(span);
+  const req = https.request({
+    method: 'POST',
+    hostname: url.hostname,
+    path: url.pathname + (url.search || ''),
+    port: url.port || 443,
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(data),
+      'Authorization': `Bearer ${bootstrap}`
+    }
+  }, (res) => {
+    res.on('data', () => {});
+    res.on('end', () => resolve(true));
+  });
+  req.on('error', reject);
+  req.write(data);
+  req.end();
+});
 
 /**
  * Extract ApiKey from Authorization header
@@ -91,6 +121,17 @@ exports.handler = async (event) => {
     // Extract ApiKey
     const apiKey = extractApiKey(event);
     if (!apiKey) {
+      // emit auth.decision (deny)
+      await postSpan({
+        id: require('crypto').randomUUID(), seq: 0,
+        entity_type: 'auth.decision', who: 'edge:authorizer', did: 'evaluated', this: 'authz',
+        at: new Date().toISOString(), status: 'denied',
+        tenant_id: event.requestContext?.domainName || null,
+        metadata: {
+          reason: 'missing_apikey', route: event.path || '', method: event.httpMethod || 'GET',
+          auth_method: 'api_key'
+        }
+      });
       console.log('❌ Missing ApiKey');
       return deny('missing_apikey');
     }
@@ -111,6 +152,13 @@ exports.handler = async (event) => {
     }));
     
     if (!result.Item) {
+      await postSpan({
+        id: require('crypto').randomUUID(), seq: 0,
+        entity_type: 'auth.decision', who: 'edge:authorizer', did: 'evaluated', this: 'authz',
+        at: new Date().toISOString(), status: 'denied',
+        tenant_id: null,
+        metadata: { reason: 'token_not_found', token_hash: tokenHash.slice(0, 12), route, method, auth_method: 'api_key' }
+      });
       console.log('❌ Token not found:', tokenHash.substring(0, 16) + '...');
       return deny('token_not_found');
     }
@@ -119,12 +167,14 @@ exports.handler = async (event) => {
     
     // Check status
     if (token.status !== 'active') {
+      await postSpan({ id: require('crypto').randomUUID(), seq:0, entity_type:'auth.decision', who:'edge:authorizer', did:'evaluated', this:'authz', at:new Date().toISOString(), status:'denied', tenant_id: token.tenant_id, metadata:{ reason:'token_inactive', token_hash: tokenHash.slice(0,12), route, method, auth_method:'api_key' } });
       console.log('❌ Token not active:', token.status);
       return deny('token_inactive');
     }
     
     // Check expiration
     if (token.exp && token.exp < Math.floor(Date.now() / 1000)) {
+      await postSpan({ id: require('crypto').randomUUID(), seq:0, entity_type:'auth.decision', who:'edge:authorizer', did:'evaluated', this:'authz', at:new Date().toISOString(), status:'denied', tenant_id: token.tenant_id, metadata:{ reason:'token_expired', token_hash: tokenHash.slice(0,12), route, method, auth_method:'api_key' } });
       console.log('❌ Token expired:', new Date(token.exp * 1000).toISOString());
       return deny('token_expired');
     }
@@ -156,6 +206,7 @@ exports.handler = async (event) => {
       });
       
       if (!hasScope) {
+        await postSpan({ id: require('crypto').randomUUID(), seq:0, entity_type:'auth.decision', who:'edge:authorizer', did:'evaluated', this:'authz', at:new Date().toISOString(), status:'denied', tenant_id: token.tenant_id, metadata:{ reason:'insufficient_scope', needed: neededScope, has: scopes, route, method, wallet_id: token.wallet_id, auth_method:'api_key' } });
         console.log('❌ Insufficient scope:', { needed: neededScope, has: scopes });
         return deny('insufficient_scope');
       }
@@ -181,6 +232,12 @@ exports.handler = async (event) => {
       }
     }
     
+    // emit auth.decision (permit)
+    await postSpan({ id: require('crypto').randomUUID(), seq:0, entity_type:'auth.decision', who:'edge:authorizer', did:'evaluated', this:'authz', at:new Date().toISOString(), status:'permitted', tenant_id: token.tenant_id, metadata:{ reason:'ok', route, method, wallet_id: token.wallet_id, token_hash: tokenHash.slice(0,12), scopes, auth_method:'api_key' } });
+
+    // emit token_use telemetry
+    await postSpan({ id: require('crypto').randomUUID(), seq:0, entity_type:'token_use', who:'edge:authorizer', did:'used', this:'security.token', at:new Date().toISOString(), status:'ok', tenant_id: token.tenant_id, metadata:{ token_hash: tokenHash.slice(0,12), route, method, scopes_checked: neededScope ? [neededScope] : [], wallet_id: token.wallet_id, trace_id: event.requestContext?.requestId || null } });
+
     console.log('✅ Token validated:', { 
       wallet_id: token.wallet_id, 
       tenant_id: token.tenant_id,
