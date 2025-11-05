@@ -44,35 +44,64 @@ async function getDbClient() {
   });
   
   let dbSecret;
+  let dbCfg;
+  
   try {
     dbSecret = await secrets.getSecretValue({ 
       SecretId: process.env.DB_SECRET_ARN 
     });
+    dbCfg = JSON.parse(dbSecret.SecretString);
   } catch (err) {
     if (err.name === 'ResourceNotFoundException' || !process.env.DB_SECRET_ARN) {
       // Fallback para variáveis de ambiente
       log('⚠️  Secrets Manager não configurado, usando variáveis de ambiente', 'yellow');
-      return new Client({
-        host: process.env.DB_HOST,
+      dbCfg = {
+        host: process.env.DB_HOST || process.env.RDS_ENDPOINT || 'loglineos-ledger-dev.cux46u4k2vtj.us-east-1.rds.amazonaws.com',
         database: process.env.DB_NAME || 'loglineos',
-        user: process.env.DB_USER,
-        password: process.env.DB_PASSWORD,
-        port: process.env.DB_PORT || 5432,
-        ssl: { rejectUnauthorized: false }
-      });
+        username: process.env.DB_USER || 'ledger_admin',
+        password: process.env.DB_PASSWORD || process.env.DB_PASS,
+        port: process.env.DB_PORT || process.env.RDS_PORT || 5432
+      };
+    } else {
+      throw err;
     }
-    throw err;
   }
   
-  const dbCfg = JSON.parse(dbSecret.SecretString);
-  return new Client({
-    host: dbCfg.host,
-    database: dbCfg.database,
-    user: dbCfg.username,
+  // Tentar com SSL primeiro, depois sem SSL se falhar
+  const clientConfig = {
+    host: dbCfg.host || dbCfg.endpoint,
+    database: dbCfg.database || dbCfg.dbname || 'loglineos',
+    user: dbCfg.username || dbCfg.user,
     password: dbCfg.password,
-    port: dbCfg.port || 5432,
+    port: dbCfg.port || 5432
+  };
+  
+  // Tentar com SSL primeiro
+  const clientWithSSL = new Client({
+    ...clientConfig,
     ssl: { rejectUnauthorized: false }
   });
+  
+  // Tentar conectar com SSL
+  try {
+    await clientWithSSL.connect();
+    log('✅ Conectado com SSL', 'green');
+    return clientWithSSL;
+  } catch (sslErr) {
+    if (sslErr.message.includes('SSL') || sslErr.message.includes('ssl')) {
+      log('⚠️  SSL falhou, tentando sem SSL...', 'yellow');
+      // Tentar sem SSL
+      const clientNoSSL = new Client(clientConfig);
+      try {
+        await clientNoSSL.connect();
+        log('✅ Conectado sem SSL', 'green');
+        return clientNoSSL;
+      } catch (noSSLErr) {
+        throw new Error(`Falha ao conectar: ${noSSLErr.message}`);
+      }
+    }
+    throw sslErr;
+  }
 }
 
 async function checkSchema(client) {
